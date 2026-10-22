@@ -23,7 +23,9 @@ async function getPopupPosition(width: number) {
 async function createPopup(page?: string, params: Record<string, string> = {}): Promise<chrome.windows.Window> {
   const { width, height } = SIZES[page ?? ''] ?? SIZES.default;
   const { left, top } = await getPopupPosition(width);
-  const popupURL = new URL('../ui/popup.html', import.meta.url);
+  // The popup page's built path comes from the manifest: referencing popup.html from here would
+  // make the bundler build a second copy of the whole UI in the service worker's environment.
+  const popupURL = new URL(chrome.runtime.getURL(chrome.runtime.getManifest().action?.default_popup ?? 'ui/popup.html'));
   if (page) {
     popupURL.searchParams.append('page', page);
   }

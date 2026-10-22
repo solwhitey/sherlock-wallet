@@ -100,7 +100,7 @@ export type PriorityFeeStats = { p25: number; p50: number; p75: number; p90: num
 export type Analysis = {
   simulatedAt: number;
   // Where the result comes from: a simulation now, the chain (a landed transaction) or a bundle.
-  source: 'simulation' | 'landed' | 'bundle';
+  source: 'simulation' | 'landed' | 'bundle' | 'wasm';
   landed?: { signature?: string; slot?: number; blockTime?: number };
   slot?: number;
   version: TxVersion;
@@ -146,7 +146,7 @@ export type Analysis = {
 export type Execution = {
   value: any;
   slot?: number;
-  source: 'landed' | 'bundle';
+  source: 'landed' | 'bundle' | 'wasm';
   blockTime?: number;
   signature?: string;
 };

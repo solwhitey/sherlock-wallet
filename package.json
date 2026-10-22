@@ -53,5 +53,8 @@
   },
   "@parcel/bundler-default": {
     "minBundleSize": 1000000000
-  }
+  },
+  "browserslist": [
+    "Chrome >= 100"
+  ]
 }

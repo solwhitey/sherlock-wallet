@@ -42,6 +42,7 @@ In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by t
 - Instructions decoded from Anchor IDLs fetched on-chain (any program that publishes one), with inner instructions, events, per-instruction compute and account names
 - Logs, accounts, raw base64, Explorer inspector link and a JSON report export
 - Request history: reopen and re-simulate any past request; paste any serialized transaction (base64 or base58) to inspect it as one of your addresses
+- Fork mode: the transaction runs in a Solana VM inside the extension (LiteSVM compiled to WebAssembly, loaded only when used), against live mainnet accounts plus balances you set ("give this wallet 1,000 USDC"). No backend or local process; needs Chrome 133+. Build notes in `docs/wasm-svm.md`
 - RPC presets, including a local [Surfpool](https://surfpool.run) fork
 
 The simulation engine (`src/sim`) has no browser dependencies. Run it from the command line with:

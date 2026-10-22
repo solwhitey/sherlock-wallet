@@ -27,6 +27,9 @@ import { CheckIcon, CopyIcon, RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
 import { rpc } from '../rpc';
 import { BundleView } from '../inspect/Bundle';
+import { ForkChange, ForkPanel, ForkStats } from '../inspect/Fork';
+
+type WasmSvm = typeof import('../../sim/wasmSvm');
 
 const RESIMULATE_MS = 5_000;
 const LIVE_MAX_MS = 10 * 60_000;
@@ -96,6 +99,12 @@ const TxInspector: FC<{
   const [detailTab, setDetailTab] = useState<DetailId>('instructions');
   const wide = useWide();
   const [mode, setMode] = useState<'landed' | 'now'>(landed ? 'landed' : 'now');
+  // Fork mode: simulate in the in-browser VM, with balances the user sets.
+  const [engine, setEngine] = useState<'rpc' | 'fork'>('rpc');
+  const [forkChanges, setForkChanges] = useState<ForkChange[]>([]);
+  const [forkStats, setForkStats] = useState<ForkStats>();
+  const [forkError, setForkError] = useState<string>();
+  const svm = useRef<WasmSvm>();
   // A replay is viewed from its fee payer unless the chosen address signed it.
   const user = useMemo(() => {
     if (!landed) return request.address;
@@ -137,12 +146,38 @@ const TxInspector: FC<{
     inFlight.current = true;
     setRunning(true);
     try {
+      let execution: Execution | undefined = mode === 'landed' ? landed : undefined;
+      if (mode === 'now' && engine === 'fork') {
+        // The VM is only loaded here, on demand: nothing about it is in the other bundles.
+        svm.current ??= await import('../../sim/wasmSvm');
+        const vm = svm.current;
+        const target = user ?? parseTransaction(bytes)?.staticKeys[0] ?? request.address;
+        const overrides = vm.mergeOverrides(
+          ...forkChanges.map((c) =>
+            c.mint === 'SOL' ? vm.giveSol(target, c.amount) : vm.giveTokens(target, c.mint, c.amount)
+          )
+        );
+        try {
+          const r = await vm.simulateInWasm(rpcUrl, bytes, overrides);
+          setForkStats({
+            fetchedBytes: r.fetchedBytes,
+            vmMs: r.timings.setAccountsMs + r.timings.simulateMs + r.timings.loadWasmMs,
+            memoryBytes: r.memoryBytes,
+            features: r.activeFeatures,
+          });
+          setForkError(undefined);
+          execution = { value: r.value, slot: r.slot, source: 'wasm' };
+        } catch (e) {
+          setForkError((e as Error).message);
+          return;
+        }
+      }
       const a = await analyze({
         rpcUrl,
         transaction: bytes,
         user,
         addressBook,
-        execution: mode === 'landed' ? landed : undefined,
+        execution,
       });
       setAnalysis(a);
       setError(undefined);
@@ -169,11 +204,18 @@ const TxInspector: FC<{
       inFlight.current = false;
       setRunning(false);
     }
-  }, [rpcUrl, bytes, user, addressBook, requote, mode, landed]);
+  }, [rpcUrl, bytes, user, addressBook, requote, mode, landed, engine, forkChanges, request.address]);
 
   useEffect(() => {
     run();
   }, [run]);
+
+  // The VM's memory goes with the window.
+  useEffect(() => {
+    const release = () => svm.current?.releaseWasmSvm();
+    window.addEventListener('pagehide', release);
+    return () => window.removeEventListener('pagehide', release);
+  }, []);
 
   // Live re-simulation: paused while the window is hidden (caught up when it shows again) and
   // switched off after 10 minutes, so a forgotten window never keeps polling.
@@ -242,6 +284,16 @@ const TxInspector: FC<{
           ]}
         />
       ) : null}
+      {mode === 'now' ? (
+        <Segmented<'rpc' | 'fork'>
+          value={engine}
+          onChange={setEngine}
+          items={[
+            { id: 'rpc', label: 'RPC' },
+            { id: 'fork', label: 'Fork' },
+          ]}
+        />
+      ) : null}
       <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={(live && mode === 'now') || running} />
       <span className="truncate">
         {running && !analysis
@@ -252,6 +304,7 @@ const TxInspector: FC<{
               ? timeAgo(analysis.simulatedAt)
               : ''}
         {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
+        {analysis?.source === 'wasm' ? ' · fork' : ''}
       </span>
       {mode === 'now' ? <Switch checked={live} onChange={setLive} label="Live" /> : null}
       <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
@@ -268,8 +321,21 @@ const TxInspector: FC<{
     </div>
   ) : null;
 
+  const fork =
+    engine === 'fork' && mode === 'now' ? (
+      <ForkPanel
+        a={analysis}
+        target={user ?? analysis?.feePayer ?? request.address}
+        changes={forkChanges}
+        setChanges={setForkChanges}
+        stats={forkStats}
+        error={forkError}
+      />
+    ) : null;
+
   const summary = analysis ? (
     <div className="space-y-3">
+      {fork}
       <ErrorBanner a={analysis} />
       <BalanceCard a={analysis} />
       <ExecutionCard
