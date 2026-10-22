@@ -436,16 +436,34 @@ const TxInspector: FC<{
   return (
     <div>
       {controls}
-      {/* The tabs scroll sideways when the side panel is too narrow for them. */}
-      <div className="-mx-5 mb-3 flex items-center gap-3 overflow-x-auto px-5 [scrollbar-width:none]">
+      {/* Narrow (side panel): short labels, spread over the full width, so all five fit. */}
+      <div className="mb-3 flex items-center gap-3">
         <Segmented<TabId>
-          className="shrink-0"
+          className="max-[560px]:flex max-[560px]:w-full"
+          itemClassName="max-[560px]:flex-1 max-[560px]:px-2"
           value={tab}
           onChange={setTab}
           items={[
             { id: 'summary', label: 'Summary' },
-            { id: 'instructions', label: `Instructions${analysis ? ` · ${analysis.instructions.length}` : ''}` },
-            { id: 'accounts', label: 'Accounts' },
+            {
+              id: 'instructions',
+              label: (
+                <>
+                  <span className="max-[560px]:hidden">Instructions</span>
+                  <span className="min-[561px]:hidden">Ixs</span>
+                  {analysis ? <span className="text-ink-3"> · {analysis.instructions.length}</span> : null}
+                </>
+              ),
+            },
+            {
+              id: 'accounts',
+              label: (
+                <>
+                  <span className="max-[560px]:hidden">Accounts</span>
+                  <span className="min-[561px]:hidden">Accs</span>
+                </>
+              ),
+            },
             { id: 'logs', label: 'Logs' },
             { id: 'raw', label: 'Raw' },
           ]}

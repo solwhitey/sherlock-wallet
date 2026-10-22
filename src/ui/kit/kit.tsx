@@ -72,23 +72,33 @@ export function Segmented<T extends string>({
   value,
   onChange,
   className,
+  itemClassName,
 }: {
   items: { id: T; label: ReactNode }[];
   value: T;
   onChange: (id: T) => void;
   className?: string;
+  itemClassName?: string;
 }) {
   const refs = useRef(new Map<T, HTMLButtonElement>());
+  const container = useRef<HTMLDivElement>(null);
   const [indicator, setIndicator] = useState<{ left: number; width: number }>();
   useLayoutEffect(() => {
-    const el = refs.current.get(value);
-    if (!el) return;
-    const next = { left: el.offsetLeft, width: el.offsetWidth };
-    setIndicator((prev) => (prev && prev.left === next.left && prev.width === next.width ? prev : next));
+    const measure = () => {
+      const el = refs.current.get(value);
+      if (!el) return;
+      const next = { left: el.offsetLeft, width: el.offsetWidth };
+      setIndicator((prev) => (prev && prev.left === next.left && prev.width === next.width ? prev : next));
+    };
+    measure();
+    // Labels and widths change with the window (short labels in the side panel): follow them.
+    const observer = new ResizeObserver(measure);
+    if (container.current) observer.observe(container.current);
+    return () => observer.disconnect();
   }, [value, items.length]);
 
   return (
-    <div className={clsx('relative inline-flex rounded-full bg-tint p-1', className)}>
+    <div ref={container} className={clsx('relative inline-flex rounded-full bg-tint p-1', className)}>
       {indicator ? (
         <span
           className="absolute bottom-1 top-1 rounded-full bg-raised shadow-[0_1px_3px_rgba(0,0,0,0.12)] transition-all duration-[var(--dur-2)] ease-[var(--ease-out)] motion-reduce:transition-none"
@@ -105,7 +115,8 @@ export function Segmented<T extends string>({
           onClick={() => onChange(item.id)}
           className={clsx(
             'relative z-10 whitespace-nowrap rounded-full px-3.5 py-1.5 text-[13px] font-semibold transition-colors',
-            item.id === value ? 'text-ink' : 'text-ink-2 hover:text-ink'
+            item.id === value ? 'text-ink' : 'text-ink-2 hover:text-ink',
+            itemClassName
           )}
         >
           {item.label}
