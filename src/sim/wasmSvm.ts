@@ -485,6 +485,7 @@ async function prepare(rpcUrl: string, txList: Uint8Array[], options: WasmSimOpt
   const cache = options.programCache ?? (defaultCache ??= createDefaultProgramCache());
   const loader = new Loader(rpcUrl, cache);
   const featuresPromise = activeFeatures(wasm, rpcUrl, cache);
+  featuresPromise.catch(() => undefined); // awaited below; don't leave it unhandled if a fetch before fails
 
   // Round 1: lookup tables (of every transaction).
   const tables = [...new Set(parsed.flatMap((tx) => tx.lookups.map((l) => l.accountKey)))];

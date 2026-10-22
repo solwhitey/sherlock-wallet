@@ -1,12 +1,19 @@
 import clsx from 'clsx';
 import React, { FC, useCallback, useEffect, useState } from 'react';
-import { BundleSimulation, simulateSequence } from '../../sim/bundle';
+import { BundleSimulation, SequenceEngine, simulateSequence } from '../../sim/bundle';
 import { RefreshIcon } from '../kit/icons';
-import { Dot, IconButton, Pill } from '../kit/kit';
+import { Dot, IconButton, Pill, Segmented } from '../kit/kit';
 import { formatAmount, lamportsToSol, symbolOf, timeAgo, toneOf } from './format';
 import { AssetRow } from './Summary';
 
-// The transactions of one request run in order, as a Jito bundle would land them.
+const ENGINE: Record<BundleSimulation['mode'], string> = {
+  bundle: 'Jito simulateBundle',
+  vm: 'Sherlock VM',
+  independent: 'one by one',
+};
+
+// The transactions of one request run in order, as a Jito bundle would land them: through the RPC's
+// simulateBundle when it has one, otherwise in the in-browser VM.
 export const BundleView: FC<{
   rpcUrl: string;
   transactions: Uint8Array[];
@@ -18,11 +25,12 @@ export const BundleView: FC<{
   const [error, setError] = useState<string>();
   const [running, setRunning] = useState(false);
   const [at, setAt] = useState<number>();
+  const [engine, setEngine] = useState<SequenceEngine>('auto');
 
   const run = useCallback(async () => {
     setRunning(true);
     try {
-      setSim(await simulateSequence(rpcUrl, transactions, user, addressBook));
+      setSim(await simulateSequence(rpcUrl, transactions, user, addressBook, engine));
       setError(undefined);
       setAt(Date.now());
     } catch (e) {
@@ -30,7 +38,7 @@ export const BundleView: FC<{
     } finally {
       setRunning(false);
     }
-  }, [rpcUrl, transactions, user, addressBook]);
+  }, [rpcUrl, transactions, user, addressBook, engine]);
 
   useEffect(() => {
     run();
@@ -40,17 +48,29 @@ export const BundleView: FC<{
   return (
     <div className="space-y-3">
       <section className="rounded-card border border-line bg-raised px-5 py-4">
-        <div className="mb-2 flex items-center gap-3">
-          <h2 className="text-[15px] font-semibold">
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <h2 className="whitespace-nowrap text-[15px] font-semibold">
             Bundle{' '}
             <span className="font-normal text-ink-2">
               · {transactions.length} transactions {sim?.mode === 'independent' ? 'simulated separately' : 'in order'}
             </span>
           </h2>
           <div className="ml-auto flex items-center gap-2 text-[11px] text-ink-2">
+            <Segmented<SequenceEngine>
+              value={engine}
+              onChange={setEngine}
+              items={[
+                { id: 'auto', label: 'Auto' },
+                { id: 'rpc', label: 'RPC bundle' },
+                { id: 'vm', label: 'Sherlock VM' },
+              ]}
+            />
             <Dot tone={!sim ? 'muted' : sim.succeeded ? 'pos' : 'neg'} pulse={running} />
-            {at ? timeAgo(at) : running ? 'Simulating…' : ''}
-            {sim?.slot ? ` · slot ${sim.slot.toLocaleString()}` : ''}
+            <span className="whitespace-nowrap">
+              {at ? timeAgo(at) : running ? 'Simulating…' : ''}
+              {sim && !running ? ` · ${ENGINE[sim.mode]}` : ''}
+              {sim?.slot ? ` · slot ${sim.slot.toLocaleString()}` : ''}
+            </span>
             <IconButton label="Simulate the bundle again" onClick={run} disabled={running} className="h-7 w-7">
               <RefreshIcon size={13} className={running ? 'animate-spin' : ''} />
             </IconButton>
@@ -58,21 +78,30 @@ export const BundleView: FC<{
         </div>
         {sim?.mode === 'independent' ? (
           <div className="mb-3 rounded-xl bg-warn-soft px-3.5 py-2.5 text-[13px]">
-            <div className="font-semibold text-warn">Simulated one by one: this RPC has no bundle simulation</div>
+            <div className="font-semibold text-warn">
+              Simulated one by one:{' '}
+              {engine === 'rpc' ? 'this RPC has no bundle simulation' : 'the in-browser VM could not run them'}
+            </div>
             <div className="text-ink-2">
               Each transaction starts from the same state, so one that depends on an earlier one (a token account it
-              creates, funds it receives) may fail here yet succeed in a real bundle. A Jito-enabled RPC (e.g. Triton)
-              runs them in sequence.
+              creates, funds it receives) may fail here yet succeed in a real bundle.{' '}
+              {engine === 'rpc' ? 'Switch to Sherlock VM, or use a Jito-enabled RPC (e.g. Triton).' : ''}
             </div>
           </div>
+        ) : null}
+        {sim?.mode === 'vm' && sim.unsupportedReason ? (
+          <p className="mb-2 text-xs text-ink-3">
+            This RPC has no bundle simulation, so the transactions ran in order in Sherlock's VM on live mainnet
+            accounts.
+          </p>
         ) : null}
         {error ? <p className="text-sm text-neg">{error}</p> : null}
         {sim ? (
           sim.succeeded ? (
             <p className="text-sm text-pos">
-              {sim.mode === 'bundle'
-                ? 'Every transaction succeeds in sequence.'
-                : 'Every transaction succeeds on its own.'}
+              {sim.mode === 'independent'
+                ? 'Every transaction succeeds on its own.'
+                : 'Every transaction succeeds in sequence.'}
             </p>
           ) : (
             <p className="text-sm text-neg">

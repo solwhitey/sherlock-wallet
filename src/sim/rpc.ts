@@ -15,10 +15,16 @@ export async function rpcCall<T = any>(url: string, method: string, params: unkn
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: nextId++, method, params }),
   });
-  if (!response.ok && response.status !== 200) {
-    throw new RpcError(response.status, `${method}: HTTP ${response.status}`);
+  const body = await response.json().catch(() => undefined);
+  const code = body?.error?.code ?? (response.ok ? undefined : response.status);
+  // The public mainnet RPC refuses every request that comes from a browser (it has an Origin).
+  if (code === 403 && /api\.mainnet-beta\.solana\.com/.test(url)) {
+    throw new RpcError(
+      403,
+      `${method}: the public Solana RPC refuses requests from browsers. Set your own RPC in Settings (Helius, Triton, QuickNode… all have free tiers).`
+    );
   }
-  const body = await response.json();
+  if (!response.ok && !body?.error) throw new RpcError(response.status, `${method}: HTTP ${response.status}`);
   if (body.error) throw new RpcError(body.error.code, `${method}: ${body.error.message}`);
   return body.result as T;
 }
