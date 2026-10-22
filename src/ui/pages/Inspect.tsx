@@ -1,4 +1,5 @@
 import type { FC } from 'react';
+import { createPortal } from 'react-dom';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { InspectRequest } from '../../background/requests';
 import { analyze, Analysis, Execution } from '../../sim/analyze';
@@ -27,7 +28,7 @@ import { CheckIcon, CopyIcon, RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
 import { rpc } from '../rpc';
 import { BundleView } from '../inspect/Bundle';
-import { ForkChange, ForkPanel, ForkStats } from '../inspect/Fork';
+import { ForkChange, ForkPanel, ForkStats, fundingSuggestion, looksUnfunded } from '../inspect/Fork';
 
 type WasmSvm = typeof import('../../sim/wasmSvm');
 
@@ -104,14 +105,16 @@ const TxInspector: FC<{
   const [forkChanges, setForkChanges] = useState<ForkChange[]>([]);
   const [forkStats, setForkStats] = useState<ForkStats>();
   const [forkError, setForkError] = useState<string>();
+  // The latest result against real state, to compare with the fork and to suggest funding.
+  const [mainnet, setMainnet] = useState<Analysis>();
   const svm = useRef<WasmSvm>();
-  // A replay is viewed from its fee payer unless the chosen address signed it.
+  // Viewed from the chosen address when it signs the transaction, otherwise from the fee payer
+  // (a replay or a pasted transaction of someone else).
   const user = useMemo(() => {
-    if (!landed) return request.address;
     const tx = parseTransaction(bytes);
     const signers = tx?.staticKeys.slice(0, tx.header.numRequiredSignatures) ?? [];
     return signers.includes(request.address) ? request.address : undefined;
-  }, [landed, bytes, request.address]);
+  }, [bytes, request.address]);
   const [series, setSeries] = useState<Record<string, SeriesPoint[]>>({});
   const [quotes, setQuotes] = useState<Record<string, QuoteState>>({});
   const inFlight = useRef(false);
@@ -180,6 +183,7 @@ const TxInspector: FC<{
         execution,
       });
       setAnalysis(a);
+      if (a.source === 'simulation') setMainnet(a);
       setError(undefined);
       onAnalysisRef.current?.(a, base64);
       setSeries((prev) => {
@@ -270,10 +274,15 @@ const TxInspector: FC<{
     download(`sherlock-${analysis.slot ?? 'tx'}-${index + 1}.json`, JSON.stringify(report, jsonReplacer, 2));
   };
 
+  // The controls live in the header; only the active transaction renders them.
+  const [controlsSlot, setControlsSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => setControlsSlot(document.getElementById('inspector-controls')), []);
+
   if (!active) return null;
 
+  // Rendered into the window header (see Inspect), next to the wallet.
   const status = (
-    <div className="ml-auto flex min-w-0 items-center gap-2 text-[11px] text-ink-2">
+    <div className="flex min-w-0 items-center gap-2 text-[11px] text-ink-2">
       {landed ? (
         <Segmented<'landed' | 'now'>
           value={mode}
@@ -289,13 +298,20 @@ const TxInspector: FC<{
           value={engine}
           onChange={setEngine}
           items={[
-            { id: 'rpc', label: 'RPC' },
+            { id: 'rpc', label: 'Mainnet' },
             { id: 'fork', label: 'Fork' },
           ]}
         />
       ) : null}
       <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={(live && mode === 'now') || running} />
-      <span className="truncate">
+      <span
+        className="truncate"
+        title={
+          analysis?.slot
+            ? `slot ${analysis.slot.toLocaleString()}${analysis.source === 'wasm' ? ' · in-browser VM' : ''}`
+            : undefined
+        }
+      >
         {running && !analysis
           ? 'Loading…'
           : analysis?.source === 'landed'
@@ -303,8 +319,6 @@ const TxInspector: FC<{
             : analysis
               ? timeAgo(analysis.simulatedAt)
               : ''}
-        {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
-        {analysis?.source === 'wasm' ? ' · fork' : ''}
       </span>
       {mode === 'now' ? <Switch checked={live} onChange={setLive} label="Live" /> : null}
       <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
@@ -326,6 +340,7 @@ const TxInspector: FC<{
       <ForkPanel
         a={analysis}
         target={user ?? analysis?.feePayer ?? request.address}
+        mainnet={mainnet}
         changes={forkChanges}
         setChanges={setForkChanges}
         stats={forkStats}
@@ -337,6 +352,16 @@ const TxInspector: FC<{
     <div className="space-y-3">
       {fork}
       <ErrorBanner a={analysis} />
+      {engine === 'rpc' && mode === 'now' && looksUnfunded(analysis) ? (
+        <FundShortcut
+          suggestion={fundingSuggestion(analysis, user ?? analysis.feePayer ?? request.address)}
+          a={analysis}
+          onTry={(changes) => {
+            setForkChanges(changes);
+            setEngine('fork');
+          }}
+        />
+      ) : null}
       <BalanceCard a={analysis} />
       <ExecutionCard
         a={analysis}
@@ -371,10 +396,12 @@ const TxInspector: FC<{
       <RawTab a={analysis} base64={base64} explorerUrl={explorerInspectorUrl(bytes)} onExport={exportReport} />
     );
 
+  const controls = controlsSlot ? createPortal(status, controlsSlot) : null;
+
   if (wide) {
     return (
       <div>
-        <div className="mb-3 flex items-center gap-3">{status}</div>
+        {controls}
         {errorBox}
         {!analysis ? (
           error ? null : (
@@ -407,7 +434,8 @@ const TxInspector: FC<{
 
   return (
     <div>
-      <div className="mb-2.5 flex items-center gap-3">
+      {controls}
+      <div className="mb-3 flex items-center gap-3">
         <Segmented<TabId>
           value={tab}
           onChange={setTab}
@@ -419,7 +447,6 @@ const TxInspector: FC<{
             { id: 'raw', label: 'Raw' },
           ]}
         />
-        {status}
       </div>
       {errorBox}
       {!analysis ? (
@@ -431,6 +458,34 @@ const TxInspector: FC<{
           {tab === 'summary' ? summary : detail(tab)}
         </div>
       )}
+    </div>
+  );
+};
+
+// Under a "not enough funds" failure: run the same transaction in a fork where the wallet has them.
+const FundShortcut: FC<{ suggestion: ForkChange[]; a: Analysis; onTry: (c: ForkChange[]) => void }> = ({
+  suggestion,
+  a,
+  onTry,
+}) => {
+  if (!suggestion.length) return null;
+  const what = suggestion
+    .map(
+      (c) =>
+        `${c.amount.toLocaleString('en-US')} ${c.mint === 'SOL' ? 'SOL' : (a.tokens[c.mint]?.symbol ?? shortAddress(c.mint))}`
+    )
+    .join(' + ');
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-card border border-line bg-raised px-5 py-3">
+      <div className="min-w-0 flex-1 text-[13px]">
+        <div className="font-semibold">This wallet does not hold enough to run it</div>
+        <div className="text-ink-2">
+          See what happens if it did: Sherlock gives it {what} in a fork and simulates again.
+        </div>
+      </div>
+      <Button kind="dark" size="sm" onClick={() => onTry(suggestion)}>
+        Try it with the funds it needs
+      </Button>
     </div>
   );
 };
@@ -551,6 +606,7 @@ export const Inspect: FC = () => {
             <div className="truncate text-[11px] text-ink-2">{METHOD_LABEL[request.method]}</div>
           ) : null}
         </div>
+        <div id="inspector-controls" className="flex shrink-0 items-center" />
         {request ? (
           <div
             className="flex min-w-0 items-center gap-2 rounded-full border border-line py-1 pl-1 pr-3"

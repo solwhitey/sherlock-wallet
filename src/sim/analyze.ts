@@ -1,3 +1,4 @@
+import { address, getAddressEncoder, getProgramDerivedAddress } from '@solana/kit';
 import bs58 from 'bs58';
 import { BUILTIN_PROGRAMS, decodeBuiltin } from './builtin';
 import { analyzeJupiter, JupiterSwap } from './jupiter';
@@ -15,6 +16,7 @@ import { InvokeNode, matchGroups, parseInvokeTree, parseLogs } from './logs';
 import { Movement, movementsOf, RouterHops, routerHops } from './flows';
 import { safetyChecks } from './safety';
 import {
+  ATA_PROGRAM,
   COMPUTE_BUDGET_PROGRAM,
   DEFAULT_CU_PER_INSTRUCTION,
   DEFAULT_LOADED_ACCOUNTS_DATA_LIMIT,
@@ -26,6 +28,8 @@ import {
   MAX_CU_LIMIT,
   maxTransactionSize,
   SYSTEM_PROGRAM,
+  TOKEN_2022_PROGRAM,
+  TOKEN_PROGRAM,
   TxVersion,
   WSOL_MINT,
 } from './programs';
@@ -488,7 +492,15 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     .filter((o) => o.assets.length);
 
   // ---- Token metadata & labels ------------------------------------------------------------
-  const mints = new Set<string>([WSOL_MINT]);
+  // When the transaction fails before running, the RPC reports no token balances and swap
+  // instructions may not name their input mint. The user's associated token accounts still give
+  // it away: find which mint in the transaction derives to each of them.
+  const userAtaMints = value.err && user ? await associatedTokenMints(user, keys) : new Map<string, string>();
+  for (const [account, mint] of userAtaMints) {
+    if (!tokenAccountOwner.has(account)) tokenAccountOwner.set(account, { owner: user, mint });
+  }
+
+  const mints = new Set<string>([WSOL_MINT, ...userAtaMints.values()]);
   for (const m of byOwner.values()) for (const a of m.keys()) if (a !== SOL) mints.add(a);
   for (const ix of instructions) {
     for (const a of ix.accounts) if (a.name?.includes('mint')) mints.add(a.address);
@@ -679,6 +691,28 @@ async function measureShortfall(rpcUrl: string, transaction: Uint8Array, instruc
   } catch {
     // Best effort: the failure is already reported.
   }
+}
+
+async function associatedTokenMints(owner: string, keys: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const inTx = new Set(keys);
+  const encoder = getAddressEncoder();
+  const ownerBytes = encoder.encode(address(owner));
+  try {
+    for (const candidate of new Set(keys)) {
+      if (candidate === owner) continue;
+      for (const tokenProgram of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
+        const [ata] = await getProgramDerivedAddress({
+          programAddress: address(ATA_PROGRAM),
+          seeds: [ownerBytes, encoder.encode(address(tokenProgram)), encoder.encode(address(candidate))],
+        });
+        if (inTx.has(ata)) out.set(ata, candidate);
+      }
+    }
+  } catch {
+    // Best effort.
+  }
+  return out;
 }
 
 const tokenMintCache = new Map<string, string>();
