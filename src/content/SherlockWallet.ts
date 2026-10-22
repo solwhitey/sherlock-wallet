@@ -1,11 +1,16 @@
-import {
-  SOLANA_CHAINS,
-  SOLANA_MAINNET_CHAIN,
-  SolanaChain,
+import { SOLANA_CHAINS, SolanaChain } from '@solana/wallet-standard';
+import type {
+  SolanaSignAndSendAllTransactionsFeature,
+  SolanaSignAndSendAllTransactionsMethod,
+  SolanaSignAndSendTransactionFeature,
+  SolanaSignAndSendTransactionInput,
+  SolanaSignAndSendTransactionMethod,
+  SolanaSignMessageFeature,
+  SolanaSignMessageMethod,
   SolanaSignTransactionFeature,
+  SolanaSignTransactionInput,
   SolanaSignTransactionMethod,
-  SolanaSignTransactionOutput,
-} from '@solana/wallet-standard';
+} from '@solana/wallet-standard-features';
 import type {
   StandardConnectFeature,
   StandardConnectMethod,
@@ -34,11 +39,11 @@ export class SolanaWalletAccount implements WalletAccount {
   }
 
   get chains() {
-    return [SOLANA_MAINNET_CHAIN] as const;
+    return SOLANA_CHAINS;
   }
 
   get features() {
-    return ['solana:signTransaction', 'solana:signAndSendTransaction'] as const;
+    return FEATURES;
   }
 
   constructor(publicKey: Uint8Array) {
@@ -50,9 +55,17 @@ export class SolanaWalletAccount implements WalletAccount {
   }
 }
 
+const FEATURES = [
+  'solana:signTransaction',
+  'solana:signAndSendTransaction',
+  'solana:signAndSendAllTransactions',
+  'solana:signMessage',
+] as const;
+
+const REJECTED = 'The user rejected the request.';
+
 let instance = 0;
 
-console.log('ver 1.0.0');
 export class SherlockWallet implements Wallet {
   #name = 'Sherlock Wallet';
   // source https://www.svgrepo.com/svg/323223/sherlock-holmes, license https://www.svgrepo.com/page/licensing#CC%20Attribution, encoded to base64
@@ -82,7 +95,13 @@ export class SherlockWallet implements Wallet {
     return SOLANA_CHAINS;
   }
 
-  get features(): StandardConnectFeature & StandardDisconnectFeature & StandardEventsFeature & SolanaSignTransactionFeature {
+  get features(): StandardConnectFeature &
+    StandardDisconnectFeature &
+    StandardEventsFeature &
+    SolanaSignTransactionFeature &
+    SolanaSignAndSendTransactionFeature &
+    SolanaSignAndSendAllTransactionsFeature &
+    SolanaSignMessageFeature {
     return {
       'standard:connect': {
         version: '1.0.0',
@@ -98,8 +117,22 @@ export class SherlockWallet implements Wallet {
       },
       'solana:signTransaction': {
         version: '1.0.0',
-        supportedTransactionVersions: ['legacy', 0],
+        supportedTransactionVersions: ['legacy', 0, 1],
         signTransaction: this.#signTransaction,
+      },
+      'solana:signAndSendTransaction': {
+        version: '1.0.0',
+        supportedTransactionVersions: ['legacy', 0, 1],
+        signAndSendTransaction: this.#signAndSendTransaction,
+      },
+      'solana:signAndSendAllTransactions': {
+        version: '1.0.0',
+        supportedTransactionVersions: ['legacy', 0, 1],
+        signAndSendAllTransactions: this.#signAndSendAllTransactions,
+      },
+      'solana:signMessage': {
+        version: '1.1.0',
+        signMessage: this.#signMessage,
       },
     };
   }
@@ -118,27 +151,21 @@ export class SherlockWallet implements Wallet {
     rpc.exposeMethod('changeAccounts', async (params) => {
       const accounts = params as { publicKey: Uint8Array }[];
 
-      this.#accounts = accounts.map(({ publicKey }) => 
-        new SolanaWalletAccount(publicKey)
-      );
+      this.#accounts = accounts.map(({ publicKey }) => new SolanaWalletAccount(publicKey));
       this.#emit('change', { accounts: this.accounts });
     });
 
     this.#rpc = rpc;
   }
 
-  #connect: StandardConnectMethod = async ({ silent } = {}) => {
-    console.log('Connecting on instance:', this.instance);
-    console.log('c ver 1.0.0');
+  #connect: StandardConnectMethod = async () => {
     const accounts = (await this.#rpc.callMethod('connect')) as { publicKey: Uint8Array }[];
 
     if (accounts === null) {
-      throw new Error('The user rejected the request.');
+      throw new Error(REJECTED);
     }
 
-    this.#accounts = accounts.map(({ publicKey }) => 
-      new SolanaWalletAccount(publicKey)
-    );
+    this.#accounts = accounts.map(({ publicKey }) => new SolanaWalletAccount(publicKey));
 
     this.#emit('change', { accounts: this.accounts });
 
@@ -149,19 +176,44 @@ export class SherlockWallet implements Wallet {
 
   #disconnect: StandardDisconnectMethod = async () => {
     this.#accounts = [];
+  };
+
+  // Sherlock holds no keys: every request opens the inspector and is rejected once it closes.
+  async #inspectTransactions(
+    method: 'signTransaction' | 'signAndSendTransaction',
+    inputs: readonly (SolanaSignTransactionInput | SolanaSignAndSendTransactionInput)[]
+  ): Promise<never> {
+    if (!inputs.length) throw new Error('no transactions');
+    for (const { chain } of inputs) {
+      if (chain && !this.chains.includes(chain as SolanaChain)) throw new Error('invalid chain');
+    }
+    await this.#rpc.callMethod('inspectTransactions', [
+      {
+        method,
+        address: inputs[0].account.address,
+        chain: inputs[0].chain,
+        origin: window.location.origin,
+        transactions: inputs.map((i) => i.transaction),
+      },
+    ]);
+    throw new Error(REJECTED);
   }
 
-  #signTransaction: SolanaSignTransactionMethod = async (...inputs) => {
-    const outputs: SolanaSignTransactionOutput[] = [];
-    for (const { transaction, account, chain } of inputs) {
-      if (!account.features.includes('solana:signTransaction')) throw new Error('invalid feature');
-      if (chain && !this.chains.includes(chain as SolanaChain)) throw new Error('invalid chain');
+  #signTransaction: SolanaSignTransactionMethod = async (...inputs) =>
+    this.#inspectTransactions('signTransaction', inputs);
 
-      await this.#rpc.callMethod('signTransaction', [{ address: account.address, transaction }]);
-      throw Error('The user rejected the transaction');
-    }
+  #signAndSendTransaction: SolanaSignAndSendTransactionMethod = async (...inputs) =>
+    this.#inspectTransactions('signAndSendTransaction', inputs);
 
-    return outputs;
+  #signAndSendAllTransactions: SolanaSignAndSendAllTransactionsMethod = async (inputs) =>
+    this.#inspectTransactions('signAndSendTransaction', inputs);
+
+  #signMessage: SolanaSignMessageMethod = async (...inputs) => {
+    const [{ account, message }] = inputs;
+    await this.#rpc.callMethod('inspectMessage', [
+      { address: account.address, message, origin: window.location.origin },
+    ]);
+    throw new Error(REJECTED);
   };
 
   #on: StandardEventsOnMethod = (event, listener) => {

@@ -1,36 +1,32 @@
-import { Transaction, VersionedTransaction } from '@solana/web3.js';
 import type { RPC } from '../messages';
 import { CONTENT_PORT_NAME, createPortTransport, createRPC, POPUP_PORT_NAME } from '../messages';
 import { asyncState } from '../utils/asyncState';
 import { openPopup } from '../utils/popup';
+import { clearHistory, getHistory, getRequest, saveRequest } from './requests';
 import { addAccount, getAccounts, removeAccount } from './storage';
 
-// This allows the background process to communicate with the popup in response
-// to content script requests.
-const asyncPopupRPC = asyncState<RPC>();
-const contentRPC = asyncState<RPC>();
+// Popup pages by tab, so a request is answered by the window opened for it and not by whichever
+// Sherlock page connected last (the toolbar popup, the home page in a tab, another request).
+const popupRPCs = new Map<number, ReturnType<typeof asyncState<RPC>>>();
+const popupRPC = (tabId: number) => {
+  let state = popupRPCs.get(tabId);
+  if (!state) popupRPCs.set(tabId, (state = asyncState<RPC>()));
+  return state;
+};
+const contentRPCs = new Set<RPC>();
 
 let connectedAccounts: { publicKey: Uint8Array }[] | undefined;
-const txObject: { address: string | undefined; transaction: Transaction | VersionedTransaction | undefined } = {
-  address: undefined,
-  transaction: undefined,
-};
+
+const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
     addAccount({ label: 'Coinbase 2', address: '2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm' });
   }
-
-  if (chrome && chrome?.runtime?.id) {
-    // Keep alive for Manifest V3 service worker
-    chrome.runtime.onInstalled.addListener(() => {
-      chrome.alarms.get('keep-alive', (a) => {
-        if (!a) {
-          chrome.alarms.create('keep-alive', { periodInMinutes: 0.1 });
-        }
-      });
-    });
-  }
+  // Keep the service worker alive while dapps hold pending requests.
+  chrome.alarms.get('keep-alive', (a) => {
+    if (!a) chrome.alarms.create('keep-alive', { periodInMinutes: 0.5 });
+  });
 });
 
 // Add a noop listener to the alarm. Without this, the service worker seems
@@ -40,9 +36,13 @@ chrome.alarms.onAlarm.addListener(() => {
   Function.prototype();
 });
 
-chrome.action.onClicked.addListener((tab) => {
-  openPopup();
-});
+async function inspect(request: Parameters<typeof saveRequest>[0]) {
+  const saved = await saveRequest(request);
+  const { popupClosed } = await openPopup('inspect', { request: saved.id });
+  await popupClosed;
+  // Sherlock never signs: closing the inspector always rejects.
+  return null;
+}
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === POPUP_PORT_NAME) {
@@ -59,22 +59,31 @@ chrome.runtime.onConnect.addListener((port) => {
       await removeAccount(account);
     });
     rpc.exposeMethod('changeAccounts', async (params) => {
-      (await contentRPC.get()).callMethod('changeAccounts', params);
+      for (const content of contentRPCs) content.callMethod('changeAccounts', params);
     });
     rpc.exposeMethod('connectedAccounts', async () => {
       return connectedAccounts;
     });
 
-    rpc.exposeMethod('getTransactionObject', async () => {
-      return txObject;
+    rpc.exposeMethod('getRequest', async ([id]) => (await getRequest(id)) ?? null);
+    rpc.exposeMethod('getHistory', getHistory);
+    rpc.exposeMethod('clearHistory', clearHistory);
+    rpc.exposeMethod('inspectPasted', async ([{ address, transactions }]) => {
+      const saved = await saveRequest({ kind: 'transactions', method: 'paste', address, transactions });
+      await openPopup('inspect', { request: saved.id });
+      return saved.id;
+    });
+    rpc.exposeMethod('openRequest', async ([id]) => {
+      await openPopup('inspect', { request: id });
     });
 
+    const tabId = port.sender?.tab?.id;
     port.onDisconnect.addListener(() => {
-      asyncPopupRPC.reset();
+      if (tabId !== undefined) popupRPCs.delete(tabId);
       rpc.end();
     });
 
-    asyncPopupRPC.set(rpc);
+    if (tabId !== undefined) popupRPC(tabId).set(rpc);
   }
 
   if (port.name === CONTENT_PORT_NAME) {
@@ -82,10 +91,11 @@ chrome.runtime.onConnect.addListener((port) => {
     const rpc = createRPC(transport);
 
     rpc.exposeMethod('connect', async () => {
-      const { closePopup, popupClosed } = await openPopup('approveConnection');
+      const { closePopup, popupClosed, tabId } = await openPopup('approveConnection');
+      if (tabId === undefined) throw new Error('approval window has no tab');
 
-      const popupRPC = await asyncPopupRPC.get();
-      const connectResult = popupRPC.callMethod('connect');
+      const approval = await popupRPC(tabId).get();
+      const connectResult = approval.callMethod('connect');
 
       const response = await Promise.race([connectResult, popupClosed]);
 
@@ -95,22 +105,26 @@ chrome.runtime.onConnect.addListener((port) => {
       return response;
     });
 
-    rpc.exposeMethod('signTransaction', async (params) => {
-      const { closePopup, popupClosed } = await openPopup('inspectTransaction');
-      const popupRPC = await asyncPopupRPC.get();
+    rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, origin }]) =>
+      inspect({
+        kind: 'transactions',
+        method,
+        address,
+        chain,
+        origin,
+        transactions: (transactions as Uint8Array[]).map(toBase64),
+      })
+    );
 
-      const [{ address, transaction: tx }] = params;
-      txObject.address = address;
-      txObject.transaction = tx;
-
-      const response = await Promise.race([popupClosed]);
-      closePopup();
-    });
+    rpc.exposeMethod('inspectMessage', async ([{ address, message, origin }]) =>
+      inspect({ kind: 'message', method: 'signMessage', address, origin, message: toBase64(message) })
+    );
 
     port.onDisconnect.addListener(() => {
+      contentRPCs.delete(rpc);
       rpc.end();
     });
 
-    contentRPC.set(rpc);
+    contentRPCs.add(rpc);
   }
 });

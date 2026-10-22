@@ -22,13 +22,30 @@ To use the Sherlock Wallet, you need to have Node.js and pnpm installed. Then se
 
 `pnpm start`
 
-In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by toggling the switch on the top right corner of the page. Click on "Load unpacked" button, select the `dist` folder generated in this repo.
+In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by toggling the switch on the top right corner of the page. Click on "Load unpacked" button, select the `dist` folder generated in this repo (or `build` after `pnpm build`).
 
 # Features
 
-- Use any Solana wallet on any wallet-standard compatible dApp to start inspecting
-- Add to address book
-- Transaction dump, inspection and simulation. Linking to the explorer
+- Use any Solana address on any wallet-standard dApp: `signTransaction`, `signAndSendTransaction`, `signAndSendAllTransactions` and `signMessage` all open the inspector (and are always rejected — Sherlock holds no keys)
+- Simulation in the popup, re-run every 5 seconds against the current chain state (stale blockhashes are replaced):
+  - balance changes for the impersonated address, in tokens and USD, and for every other owner touched (pools, vaults)
+  - fees (base, priority, Jito tips), rent locked and reclaimed, compute used against the limit, loaded account data
+  - checks: transaction size (1232 bytes for legacy/v0, 4096 for v1), compute headroom, priority fee against recent fees on the same accounts, expired blockhash, extra signers
+  - errors decoded by name from the failing program's IDL (e.g. `SlippageToleranceExceeded`)
+- Jupiter swaps (v6 `route`/`shared_accounts_route`/`exact_out` and the `_v2` variants used by Ultra):
+  - quoted vs simulated amount in bps, minimum out / maximum in, and the room left before the slippage limit (what a sandwich could take)
+  - value in vs out at Jupiter prices, platform fee and positive-slippage cap
+  - route plan and the hops actually simulated, per AMM
+  - when the swap reverts on slippage, it is simulated again with the limit opened to show how far past it the route fills
+  - a fresh quote for the same trade to compare against, and a chart of the simulated output over time
+- Instructions decoded from Anchor IDLs fetched on-chain (any program that publishes one), with inner instructions, events, per-instruction compute and account names
+- Logs, accounts, raw base64, Explorer inspector link and a JSON report export
+- Request history: reopen and re-simulate any past request; paste any serialized transaction (base64 or base58) to inspect it as one of your addresses
+- RPC presets, including a local [Surfpool](https://surfpool.run) fork
+
+The simulation engine (`src/sim`) has no browser dependencies. Run it from the command line with:
+
+`RPC_URL=https://... pnpm inspect <tx.b64 | base64> [address]`
 
 # Use cases
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Sherlock Wallet",
-  "description": "",
-  "version": "0.0.3",
+  "description": "Impersonate any Solana address in dapps and inspect every transaction they ask you to sign: simulation, balance changes, Jupiter slippage, fees, decoded instructions.",
+  "version": "0.1.0",
   "icons": {
     "16": "resources/icon16.png",
     "32": "resources/icon32.png",
@@ -18,12 +18,8 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "*://*/*"
-      ],
-      "js": [
-        "content/index.ts"
-      ]
+      "matches": ["*://*/*"],
+      "js": ["content/index.ts"]
     }
   ],
   "commands": {
@@ -36,10 +32,6 @@
       }
     }
   },
-  "permissions": [
-    "alarms",
-    "storage"
-  ],
-  "host_permissions": [
-  ]
+  "permissions": ["alarms", "storage"],
+  "host_permissions": ["https://lite-api.jup.ag/*", "http://127.0.0.1/*", "http://localhost/*"]
 }
