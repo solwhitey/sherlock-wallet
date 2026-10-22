@@ -1,4 +1,4 @@
-import { AddressLookupTableAccount, VersionedTransaction } from '@solana/web3.js';
+import { AddressLookupTableAccount, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { BUILTIN_PROGRAMS, decodeBuiltin } from './builtin';
 import { analyzeJupiter, JupiterSwap } from './jupiter';
@@ -27,6 +27,7 @@ import {
   WSOL_MINT,
 } from './programs';
 import { getMultipleAccounts, rpcCall } from './rpc';
+import { isWritable, ParsedTransaction, parseTransaction, patchInstructionData, V1_VERSION_BYTE, V1Config } from './tx';
 import { describeError } from './errors';
 
 export const SOL = 'SOL';
@@ -93,6 +94,8 @@ export type Analysis = {
   priorityFees?: PriorityFeeStats;
   // Programs called at the top level, other than the runtime's own (compute budget, system, token…).
   programs: string[];
+  // The v1 header's compute budget (SIMD-0385), when the transaction is v1.
+  v1Config?: V1Config;
   tokens: Record<string, TokenInfo>;
   labels: Record<string, string>;
   checks: Check[];
@@ -107,38 +110,20 @@ export type AnalyzeInput = {
 
 const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
 
-function detectVersion(bytes: Uint8Array): TxVersion {
-  // compact-u16 signature count, then 64-byte signatures, then the message prefix.
-  let count = 0;
-  let shift = 0;
-  let i = 0;
-  for (; i < 3; i++) {
-    const b = bytes[i];
-    count |= (b & 0x7f) << shift;
-    shift += 7;
-    if (!(b & 0x80)) break;
-  }
-  const prefix = bytes[i + 1 + count * 64];
-  if (prefix === undefined) return 'unknown';
-  if (!(prefix & 0x80)) return 'legacy';
-  const v = prefix & 0x7f;
-  return v === 0 ? 0 : v === 1 ? 1 : 'unknown';
-}
-
-async function resolveLookups(rpcUrl: string, tx: VersionedTransaction) {
-  const lookups = tx.message.addressTableLookups;
+async function resolveLookups(rpcUrl: string, tx: ParsedTransaction) {
+  const lookups = tx.lookups;
   if (!lookups.length) return { writable: [] as string[], readonly: [] as string[] };
   const accounts = await getMultipleAccounts(
     rpcUrl,
-    lookups.map((l) => l.accountKey.toBase58())
+    lookups.map((l) => l.accountKey)
   );
   const writable: string[] = [];
   const readonly: string[] = [];
   lookups.forEach((l, i) => {
     const raw = accounts[i];
-    if (!raw) throw new Error(`lookup table ${l.accountKey.toBase58()} not found`);
+    if (!raw) throw new Error(`lookup table ${l.accountKey} not found`);
     const table = new AddressLookupTableAccount({
-      key: l.accountKey,
+      key: new PublicKey(l.accountKey),
       state: AddressLookupTableAccount.deserialize(Buffer.from(raw.data[0], 'base64')),
     });
     writable.push(...l.writableIndexes.map((j) => table.state.addresses[j].toBase58()));
@@ -190,21 +175,14 @@ export function usdValue(asset: { mint: string; decimals: number }, amount: bigi
 
 export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const { rpcUrl, transaction } = input;
-  const version = detectVersion(transaction);
-  let tx: VersionedTransaction | undefined;
-  try {
-    tx = VersionedTransaction.deserialize(transaction);
-  } catch {
-    tx = undefined;
-  }
-
-  const message = tx?.message;
-  const staticKeys = message?.staticAccountKeys.map((k) => k.toBase58()) ?? [];
-  const numSigners = message?.header.numRequiredSignatures ?? 0;
+  const tx = parseTransaction(transaction);
+  const version: TxVersion = tx?.version ?? (transaction[0] === V1_VERSION_BYTE ? 1 : 'unknown');
+  const staticKeys = tx?.staticKeys ?? [];
+  const numSigners = tx?.header.numRequiredSignatures ?? 0;
   const signers = staticKeys.slice(0, numSigners);
   const feePayer = staticKeys[0];
   const user = input.user ?? feePayer ?? '';
-  const recentBlockhash = message?.recentBlockhash;
+  const recentBlockhash = tx?.recentBlockhash;
 
   const simPromise = rpcCall<any>(rpcUrl, 'simulateTransaction', [
     toBase64(transaction),
@@ -222,17 +200,26 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
         .catch(() => undefined)
     : Promise.resolve(undefined);
 
-  const sim = await simPromise;
+  // An RPC that cannot simulate the transaction (e.g. a format it does not support yet) still
+  // leaves everything that can be read from the transaction itself.
+  let sim: any;
+  let rpcRefusal: string | undefined;
+  try {
+    sim = await simPromise;
+  } catch (e) {
+    rpcRefusal = (e as Error).message;
+    sim = { value: { err: 'SimulationRefused', logs: [] } };
+  }
   const value = sim.value;
 
   let loaded: { writable: string[]; readonly: string[] } = value.loadedAddresses ?? { writable: [], readonly: [] };
-  if (tx && !value.loadedAddresses && tx.message.addressTableLookups.length) {
+  if (tx && !value.loadedAddresses && tx.lookups.length) {
     loaded = await resolveLookups(rpcUrl, tx).catch(() => ({ writable: [], readonly: [] }));
   }
   const keys = [...staticKeys, ...loaded.writable, ...loaded.readonly];
   const accountKeys: AccountMeta[] = keys.map((address, i) => ({
     address,
-    writable: message ? message.isAccountWritable(i) : false,
+    writable: tx ? isWritable(tx, i) : false,
     signer: i < numSigners,
   }));
   const writableKeys = accountKeys.filter((a) => a.writable).map((a) => a.address);
@@ -240,7 +227,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const priorityPromise = priorityFeeStats(rpcUrl, writableKeys);
 
   // ---- Instructions ------------------------------------------------------------------------
-  const compiled = message?.compiledInstructions ?? [];
+  const compiled = tx?.instructions ?? [];
   const innerByIndex = new Map<number, any[]>();
   for (const group of value.innerInstructions ?? []) innerByIndex.set(group.index, group.instructions);
 
@@ -327,7 +314,17 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   let cuLimit: number | undefined;
   let microLamports = 0n;
   let loadedLimit = DEFAULT_LOADED_ACCOUNTS_DATA_LIMIT;
-  for (const ix of instructions) {
+  let priorityLamports: bigint | undefined;
+  const v1Config = tx?.config;
+  if (v1Config) {
+    // v1: the header is the only source; compute budget instructions are ignored (they still run
+    // as no-ops). Unset values are the minimum: no fee, a 0 CU limit, a 0 (32 KiB) data limit.
+    cuLimit = v1Config.computeUnitLimit ?? 0;
+    priorityLamports = v1Config.priorityFeeLamports ?? 0n;
+    microLamports = cuLimit > 0 ? (priorityLamports * 1_000_000n) / BigInt(cuLimit) : 0n;
+    loadedLimit = v1Config.loadedAccountsDataSizeLimit ?? 0;
+  }
+  for (const ix of v1Config ? [] : instructions) {
     if (ix.programId !== COMPUTE_BUDGET_PROGRAM || !ix.decoded?.args) continue;
     if (ix.decoded.name === 'SetComputeUnitLimit') cuLimit = Number(ix.decoded.args.units);
     if (ix.decoded.name === 'SetComputeUnitPrice') microLamports = ix.decoded.args.microLamports as bigint;
@@ -336,7 +333,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const nonBudget = instructions.filter((ix) => ix.programId !== COMPUTE_BUDGET_PROGRAM).length;
   const limit = cuLimit ?? Math.min(MAX_CU_LIMIT, nonBudget * DEFAULT_CU_PER_INSTRUCTION);
   const base = BigInt(numSigners * LAMPORTS_PER_SIGNATURE);
-  const priority = (microLamports * BigInt(limit) + 999_999n) / 1_000_000n;
+  const priority = priorityLamports ?? (microLamports * BigInt(limit) + 999_999n) / 1_000_000n;
 
   let jitoTip = 0n;
   const visit = (ix: Instr) => {
@@ -434,7 +431,11 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   }
 
   // ---- Error ---------------------------------------------------------------------------------
-  const error = value.err ? describeError(value.err, parsedLogs.failure, idls, instructions, labels) : undefined;
+  const error = rpcRefusal
+    ? { text: `The RPC would not simulate this transaction: ${rpcRefusal}`, name: 'Simulation refused by the RPC' }
+    : value.err
+      ? describeError(value.err, parsedLogs.failure, idls, instructions, labels)
+      : undefined;
 
   // ---- Jupiter & generic swap ---------------------------------------------------------------
   const jupiter = analyzeJupiter({
@@ -465,6 +466,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const analysis: Analysis = {
     simulatedAt: Date.now(),
     slot: sim.context?.slot,
+    v1Config,
     version,
     size: transaction.length,
     maxSize: maxTransactionSize(version),
@@ -511,13 +513,12 @@ async function measureShortfall(rpcUrl: string, transaction: Uint8Array, instruc
   const offset = instructions[index]?.decoded?.argOffsets?.slippage_bps;
   if (offset === undefined) return;
   try {
-    const tx = VersionedTransaction.deserialize(transaction);
-    const ix = tx.message.compiledInstructions[index];
-    const data = Uint8Array.from(ix.data);
+    const tx = parseTransaction(transaction);
+    if (!tx) return;
+    const data = Uint8Array.from(tx.instructions[index].data);
     new DataView(data.buffer).setUint16(offset, 9_999, true);
-    ix.data = data;
     const sim = await rpcCall<any>(rpcUrl, 'simulateTransaction', [
-      toBase64(tx.serialize()),
+      toBase64(patchInstructionData(transaction, tx, index, data)),
       { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' },
     ]);
     const { groups } = parseLogs(sim.value.logs ?? []);
@@ -594,6 +595,51 @@ function buildChecks(a: Analysis, decoded: boolean): Check[] {
       : { level: 'ok', title: 'Simulation succeeded', detail: a.slot ? `slot ${a.slot.toLocaleString()}` : undefined }
   );
 
+  if (a.v1Config) {
+    const c = a.v1Config;
+    if (c.computeUnitLimit === undefined || c.computeUnitLimit === 0) {
+      checks.push({
+        level: 'error',
+        title: 'v1 header sets no compute unit limit',
+        detail: 'Unset means 0 compute units for a v1 transaction: it fails at execution.',
+      });
+    }
+    if (!c.loadedAccountsDataSizeLimit) {
+      checks.push({
+        level: 'error',
+        title: 'v1 header sets no loaded account data limit',
+        detail: 'Unset means 0 bytes for a v1 transaction: any account load fails.',
+      });
+    }
+    if (a.instructions.some((ix) => ix.programId === COMPUTE_BUDGET_PROGRAM)) {
+      checks.push({
+        level: 'warn',
+        title: 'Compute budget instructions are ignored in v1',
+        detail: 'v1 takes limits and priority fee from the header only; these instructions just cost compute.',
+      });
+    }
+    checks.push({
+      level: 'ok',
+      title: `v1 header: ${c.priorityFeeLamports !== undefined ? `${c.priorityFeeLamports.toLocaleString()} lamports priority` : 'no priority fee'}`,
+      detail: [
+        c.computeUnitLimit !== undefined ? `CU limit ${c.computeUnitLimit.toLocaleString()}` : undefined,
+        c.loadedAccountsDataSizeLimit !== undefined
+          ? `data limit ${c.loadedAccountsDataSizeLimit.toLocaleString()} B`
+          : undefined,
+        c.heapSize !== undefined ? `heap ${c.heapSize.toLocaleString()} B` : undefined,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    });
+  }
+  if (a.accountKeys.length > 64) {
+    checks.push({
+      level: 'error',
+      title: `${a.accountKeys.length} accounts, over the 64-account limit`,
+      detail: a.version === 1 ? 'SIMD-0596 (draft) would raise the v1 limit to 96.' : undefined,
+    });
+  }
+
   const sizePct = (a.size / a.maxSize) * 100;
   checks.push({
     level: a.size > a.maxSize ? 'error' : sizePct > 90 ? 'warn' : 'ok',
@@ -617,7 +663,8 @@ function buildChecks(a: Analysis, decoded: boolean): Check[] {
         title: `No compute limit set: ${cu}`,
         detail: 'Default limits make the transaction harder to schedule.',
       });
-    else if (used < 0.5 && a.compute.microLamportsPerCu > 0n)
+    // v1 pays a flat priority fee, so an oversized limit costs nothing extra there.
+    else if (used < 0.5 && a.compute.microLamportsPerCu > 0n && a.version !== 1)
       checks.push({
         level: 'info',
         title: `Compute limit is ${Math.round(1 / used)}× usage: ${cu}`,
@@ -649,7 +696,7 @@ function buildChecks(a: Analysis, decoded: boolean): Check[] {
     });
   }
 
-  if (a.loadedAccountsDataSize !== undefined) {
+  if (a.loadedAccountsDataSize !== undefined && a.loadedAccountsDataLimit > 0) {
     const pct = a.loadedAccountsDataSize / a.loadedAccountsDataLimit;
     checks.push({
       level: pct > 1 ? 'error' : pct > 0.9 ? 'warn' : 'ok',

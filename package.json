@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "source": "src/manifest.json",
   "scripts": {
-    "clean": "shx mkdir -p .parcel-cache dist lib && shx rm -rf .parcel-cache dist lib",
+    "clean": "shx mkdir -p .parcel-cache dist lib build && shx rm -rf .parcel-cache dist lib build",
     "start": "parcel --host localhost --port 1234 --no-hmr",
     "build": "parcel build --dist-dir build --no-source-maps",
     "fmt": "prettier --write '{*,**/*}.{ts,tsx,js,jsx,json}'",
@@ -15,6 +15,7 @@
     "inspect": "tsx scripts/inspect.ts"
   },
   "dependencies": {
+    "@solana/kit": "8.5.0",
     "@solana/wallet-standard": "1.1.8",
     "@solana/wallet-standard-features": "^1.5.0",
     "@solana/web3.js": "^1.99.0",

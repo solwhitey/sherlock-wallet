@@ -499,9 +499,19 @@ const NetworkFees: FC<{ a: Analysis; paysFees: boolean }> = ({ a, paysFees }) =>
           sub={`priority ${lamportsToSol(fees.priority)}`}
         />
         <Stat
-          label="Priority price"
-          value={`${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU`}
-          sub={rank ? `${rank} of recent · p50 ${a.priorityFees!.p50.toLocaleString()}` : undefined}
+          label={a.v1Config ? 'Priority · v1 header' : 'Priority price'}
+          value={
+            a.v1Config
+              ? `${(a.v1Config.priorityFeeLamports ?? 0n).toLocaleString()} lamports`
+              : `${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU`
+          }
+          sub={
+            a.v1Config
+              ? `≈ ${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU${rank ? ` · ${rank}` : ''}`
+              : rank
+                ? `${rank} of recent · p50 ${a.priorityFees!.p50.toLocaleString()}`
+                : undefined
+          }
         />
         <Stat
           label="Jito tip"

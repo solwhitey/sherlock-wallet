@@ -26,6 +26,7 @@ In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by t
 
 # Features
 
+- Legacy, v0 and v1 (SIMD-0385) transactions, decoded with @solana/kit; v1 header limits and flat priority fees are read and checked
 - Use any Solana address on any wallet-standard dApp: `signTransaction`, `signAndSendTransaction`, `signAndSendAllTransactions` and `signMessage` all open the inspector (and are always rejected — Sherlock holds no keys)
 - Simulation in the popup, re-run every 5 seconds against the current chain state (stale blockhashes are replaced):
   - balance changes for the impersonated address, in tokens and USD, and for every other owner touched (pools, vaults)
