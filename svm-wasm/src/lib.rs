@@ -14,7 +14,9 @@
 //!   svm_drop()                       free the VM (linear memory stays allocated)
 //!   svm_set_account(ptr, len) -> i32 packed account, see `set_account`
 //!   svm_set_clock(slot, epoch_start_ts, epoch, leader_epoch, unix_ts)
-//!   svm_simulate(ptr, len) -> i32    bincode VersionedTransaction; JSON result
+//!   svm_simulate(ptr, len) -> i32    wire transaction; JSON result, state unchanged
+//!   svm_execute(ptr, len) -> i32     wire transaction; JSON result, state COMMITTED
+//!   svm_get_accounts(ptr, len)       packed addresses -> JSON accounts (or null)
 //!   svm_out_ptr() / svm_out_len()    last JSON output (result or error)
 
 use {
@@ -192,33 +194,32 @@ pub unsafe extern "C" fn svm_set_account(ptr: *const u8, len: usize) -> i32 {
     }
 }
 
-/// Simulates a bincode-serialised VersionedTransaction (legacy, v0 or v1, the
-/// raw wire bytes). Writes a JSON object to the out buffer:
-/// { err, logs, unitsConsumed, fee, returnData, innerInstructions,
-///   postAccounts: [{ pubkey, lamports, owner, executable, data (base64) }] }
-/// Returns 0 when the VM ran (err may still be set), 1 when the input was bad.
-///
-/// # Safety
-/// `ptr` must point to `len` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn svm_simulate(ptr: *const u8, len: usize) -> i32 {
+unsafe fn decode_tx(ptr: *const u8, len: usize) -> Option<VersionedTransaction> {
     let bytes = std::slice::from_raw_parts(ptr, len);
-    let tx: VersionedTransaction = match wincode::deserialize(bytes) {
-        Ok(tx) => tx,
+    match wincode::deserialize(bytes) {
+        Ok(tx) => Some(tx),
         Err(e) => {
             set_out(&json!({ "error": format!("decode transaction: {e}") }));
-            return 1;
+            None
         }
-    };
-    let result = with_vm(|vm| vm.simulate_transaction(tx));
-    let (err, meta, post) = match result {
-        Ok(info) => (Value::Null, info.meta, info.post_accounts),
-        Err(failed) => (
-            serde_json::to_value(&failed.err).unwrap_or(Value::Null),
-            failed.meta,
-            Vec::new(),
-        ),
-    };
+    }
+}
+
+fn account_json(a: &impl solana_account::ReadableAccount) -> Value {
+    json!({
+        "lamports": a.lamports(),
+        "owner": a.owner().to_string(),
+        "executable": a.executable(),
+        "data": b64(a.data()),
+    })
+}
+
+/// The per-transaction result object shared by svm_simulate and svm_execute.
+fn result_json(
+    err: Value,
+    meta: &litesvm::types::TransactionMetadata,
+    post: &[(Address, solana_account::AccountSharedData)],
+) -> Value {
     let inner: Vec<Value> = meta
         .inner_instructions
         .iter()
@@ -244,20 +245,15 @@ pub unsafe extern "C" fn svm_simulate(ptr: *const u8, len: usize) -> i32 {
             "data": [b64(&meta.return_data.data), "base64"],
         })
     };
-    use solana_account::ReadableAccount;
     let post_accounts: Vec<Value> = post
         .iter()
         .map(|(k, a)| {
-            json!({
-                "pubkey": k.to_string(),
-                "lamports": a.lamports(),
-                "owner": a.owner().to_string(),
-                "executable": a.executable(),
-                "data": b64(a.data()),
-            })
+            let mut v = account_json(a);
+            v["pubkey"] = json!(k.to_string());
+            v
         })
         .collect();
-    set_out(&json!({
+    json!({
         "err": err,
         "logs": meta.logs,
         "unitsConsumed": meta.compute_units_consumed,
@@ -265,8 +261,75 @@ pub unsafe extern "C" fn svm_simulate(ptr: *const u8, len: usize) -> i32 {
         "returnData": return_data,
         "innerInstructions": inner,
         "postAccounts": post_accounts,
-    }));
+    })
+}
+
+/// Simulates a VersionedTransaction (raw wire bytes: legacy, v0 or v1) without
+/// changing the VM's state. Writes a JSON object to the out buffer:
+/// { err, logs, unitsConsumed, fee, returnData, innerInstructions,
+///   postAccounts: [{ pubkey, lamports, owner, executable, data (base64) }] }
+/// Returns 0 when the VM ran (err may still be set), 1 when the input was bad.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn svm_simulate(ptr: *const u8, len: usize) -> i32 {
+    let Some(tx) = decode_tx(ptr, len) else { return 1 };
+    let out = match with_vm(|vm| vm.simulate_transaction(tx)) {
+        Ok(info) => result_json(Value::Null, &info.meta, &info.post_accounts),
+        Err(failed) => result_json(
+            serde_json::to_value(&failed.err).unwrap_or(Value::Null),
+            &failed.meta,
+            &[],
+        ),
+    };
+    set_out(&out);
     0
+}
+
+/// Executes a transaction and COMMITS it to the VM's accounts, as a validator
+/// would: on success every account change is kept; on failure only the fee is
+/// charged to the payer (when the transaction got far enough to be included),
+/// everything else is left as it was. Same JSON as svm_simulate, with an empty
+/// postAccounts: read the committed state with svm_get_accounts.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn svm_execute(ptr: *const u8, len: usize) -> i32 {
+    let Some(tx) = decode_tx(ptr, len) else { return 1 };
+    let out = match with_vm(|vm| vm.send_transaction(tx)) {
+        Ok(meta) => result_json(Value::Null, &meta, &[]),
+        Err(failed) => result_json(
+            serde_json::to_value(&failed.err).unwrap_or(Value::Null),
+            &failed.meta,
+            &[],
+        ),
+    };
+    set_out(&out);
+    0
+}
+
+/// Reads accounts from the VM: packed 32-byte addresses in, JSON array out,
+/// one { lamports, owner, executable, data (base64) } or null per address.
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn svm_get_accounts(ptr: *const u8, len: usize) {
+    let buf = std::slice::from_raw_parts(ptr, len);
+    let out: Vec<Value> = with_vm(|vm| {
+        buf.chunks_exact(32)
+            .map(|c| {
+                let address = Address::new_from_array(c.try_into().unwrap());
+                vm.accounts_db()
+                    .get_account_ref(&address)
+                    .map(account_json)
+                    .unwrap_or(Value::Null)
+            })
+            .collect()
+    });
+    set_out(&json!(out));
 }
 
 #[cfg(target_family = "wasm")]

@@ -48,6 +48,55 @@ a nightly Rust toolchain to build (pinned in `svm-wasm/rust-toolchain.toml`).
   has its own VM, reused across re-simulations (programs stay compiled; calls are queued so they
   never interleave). `releaseWasmSvm()` drops it; closing the window frees it regardless.
 
+## Sequences (bundles without simulateBundle)
+
+```ts
+simulateSequenceInWasm(rpcUrl, txs: Uint8Array[], { overrides?, tokenBalances?, programCache? })
+  → Promise<{
+      results: Array<{ value, slot } | undefined>, // value: simulateTransaction's shape, per tx
+      failedIndex?: number,                         // first failing tx; later entries undefined
+      slot, timings, fetchedBytes, accountCount, memoryBytes,
+    }>
+```
+
+- Accounts of **all** transactions (each one's lookup tables resolved, programs through the
+  program cache) are fetched up front in the same consistent round as a single simulation, and
+  the overrides are applied once.
+- Each transaction then runs with `svm_execute` (LiteSVM `send_transaction` semantics): success
+  commits every account change in the VM; failure charges only the fee (when the transaction got
+  as far as being included) and leaves everything else as it was, as on chain. Sigverify and
+  blockhash checks stay off.
+- `preBalances` / `preTokenBalances` of transaction N are read from the VM after N-1 ran (its
+  post-state), `post*` after N ran (`svm_get_accounts`). Mints first met mid-sequence get their
+  decimals from the VM.
+- The run stops at the first failure, like a Jito bundle; `failedIndex` says where.
+- Same VM instance and queue as `simulateInWasm` (unchanged). Committed state never leaks into
+  later runs: every run re-pushes all of its accounts from fresh RPC state (absent ones as empty);
+  the script checks it.
+- **Difference from Jito:** for the failing transaction simulateBundle reports `unitsConsumed: 0`,
+  no logs and post = pre (the bundle does not land), while the VM reports what the transaction
+  did before failing and charges its fee, as a standalone transaction on chain would.
+- simulateBundle truncates logs (`Log truncated` after ~15 lines); the VM keeps Agave's 10 KB cap.
+
+Parity (`scripts/wasm-svm-sequence.ts`: simulateBundle with pre/post execution accounts for
+every key, both started together):
+
+| Sequence | simulateBundle | VM |
+| --- | --- | --- |
+| tx_swap then tx_sol (whale, Jupiter) | succeeded, CU 722 154 / 189 067 | same CU; lamports and token amounts identical on all 51 / 33 accounts, pre and post; logs identical up to the RPC's truncation |
+| fund an empty wallet (SOL + ATA + 100 USDC), then it sends the USDC back | succeeded, CU 13 771 / 105 | identical (8 / 5 accounts) |
+| the same, reversed | fails at tx 0, `AccountNotFound` | `failedIndex: 0`, `AccountNotFound` |
+| fund, send 100 back, send 1 more | fails at tx 2, `Custom 1` (insufficient funds) | `failedIndex: 2`, `{"InstructionError":[0,{"Custom":1}]}`; tx 0 and 1 identical |
+
+When the two sides read different slots, hot pool accounts differ in pre and post alike; within a
+run, tx 1's pre equals tx 0's post on both sides. tx_swap then tx_sol no longer fails with
+`InvalidTokenAccount` on mainnet: simulateBundle and the VM both say it succeeds today (the
+whale's accounts changed since that observation).
+
+Timings (Node, warm program cache): swap + sol 435 ms total (fetch 285 ms, 1.66 MB; set 3 ms;
+execute both + read state back 146 ms, mostly base64 JSON of the large accounts read between
+transactions); the 3-transaction USDC sequence 71–88 ms (fetch 60–75 ms).
+
 ## What changed in round 2
 
 - **Feature set from chain.** The VM is built with the features active on mainnet, read from the
@@ -69,7 +118,7 @@ a nightly Rust toolchain to build (pinned in `svm-wasm/rust-toolchain.toml`).
   `immutable:<address>` for loader-v1/v2 programs (SPL Token, Memo…, never change). Non-program
   accounts are never cached: every simulation reads fresh state. Node gets a memory cache with the
   same cap.
-- **wasm-opt** in `build.sh` (binaryen 133), default `-Oz`.
+- **wasm-opt** in `build.sh` (binaryen 133); `-Oz` in round 2, `-O3` behind `OPTIMIZE=1` since round 3.
 - **Pinned toolchain**: `svm-wasm/rust-toolchain.toml` → `nightly-2026-04-24`
   (rustc 1.97.0-nightly 36ba2c771), with `rust-src` and `llvm-tools`; `cargo build --locked`.
 - Override helpers `giveSol` / `giveTokens` (UI amounts use the mint's decimals) / `mergeOverrides`.
@@ -83,11 +132,11 @@ Sizes (`svm-wasm/build.sh`, with precompiles):
 | --- | --- | --- |
 | raw `cargo build --release` | 6 858 860 | — |
 | `wasm-opt -O3` | 5 739 630 | 2 696 213 |
-| **`wasm-opt -Oz` (shipped)** | **5 694 110** | **2 687 680** |
+| `wasm-opt -Oz` (round 2) | 5 694 110 | 2 687 680 |
 
 Run time is the same for all three (Node 24, swap fixture, medians of 3 fresh VMs × 4 runs:
 instantiate 3.4 ms, load + compile 15 ms, simulate 8.8 ms for -O3 and -Oz, 9.3 ms raw), so `-Oz`
-ships. It only costs build time (`-Oz` takes several minutes in wasm-opt, `-O3` about one).
+shipped in round 2; since round 3 the artifact is `-O3` (cheaper to build, see caveat 5).
 
 Chromium 152, the swap fixture (Jupiter v6, 51 accounts, 7 upgradeable programs, ~700k CU), the
 extension's own Parcel build (webextension config) of a test page served locally, real IndexedDB
@@ -171,12 +220,13 @@ Patches, all outside the runtime:
 ## Build and run
 
 ```sh
-brew install binaryen                                 # wasm-opt, once
-svm-wasm/build.sh                                     # rustup installs the pinned nightly on first use
-                                                      # → src/sim/svm.wasm (committed)
+svm-wasm/build.sh             # iterate: raw cargo output -> src/sim/svm.wasm, no wasm-opt
+OPTIMIZE=1 svm-wasm/build.sh  # release artifact: + wasm-opt -O3 (brew install binaryen)
+# both run at nice 19, 4 cargo jobs, BINARYEN_CORES=2; rustup installs the pinned nightly on first use
 RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-check.ts tx_transfer.b64 tx_v1.b64 tx_swap.b64
 RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-override.ts
 RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-precompiles.ts
+RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-sequence.ts [tx1.b64 tx2.b64 ...]
 # browser bench: build scripts/wasm-bench as an extension page (or with --public-url ./ for a plain
 # page), serve it with rpc.txt and a fixture next to it, open ?tx=tx_swap.b64[&clear=1]
 ```
@@ -192,5 +242,6 @@ RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-precompiles.ts
    chain.
 4. **Precompile parity** rests on `p256` matching OpenSSL for secp256r1 (range checks are explicit
    and identical; tested on valid and tampered signatures, not fuzzed).
-5. Building `-Oz` takes several minutes of wasm-opt; the artifact is committed so UI work never
-   needs Rust.
+5. The shipped artifact is `wasm-opt -O3` (since round 3: 5 754 061 bytes, gzip 2 701 607;
+   `OPTIMIZE=1` build 211 s at nice 19 with 2 binaryen threads, cargo cached). It is committed so
+   UI work never needs Rust; `-Oz` saves under 1 % for several more minutes of CPU.
