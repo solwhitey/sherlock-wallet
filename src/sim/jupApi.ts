@@ -1,6 +1,19 @@
 import { cacheGet, cacheSet } from './cache';
 
-export const JUP_API = 'https://lite-api.jup.ag';
+// lite-api.jup.ag is deprecated; api.jup.ag works without a key at a low rate limit, and with one
+// (x-api-key, from portal.jup.ag) at the key's limit.
+export const JUP_API = 'https://api.jup.ag';
+export const JUP_KEY_STORAGE = 'Sherlock-jup-key';
+
+function apiKey(): string | undefined {
+  try {
+    const stored = globalThis.localStorage?.getItem(JUP_KEY_STORAGE);
+    if (stored) return JSON.parse(stored) || undefined;
+  } catch {
+    // No storage (Node scripts) or unreadable value.
+  }
+  return (globalThis as any).process?.env?.JUP_API_KEY || undefined;
+}
 
 export type TokenInfo = {
   mint: string;
@@ -13,8 +26,10 @@ export type TokenInfo = {
 };
 
 async function getJson(url: string) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  const key = apiKey();
+  const response = await fetch(url, key ? { headers: { 'x-api-key': key } } : undefined);
+  if (response.status === 429) throw new Error('Jupiter rate limit hit, try again in a minute');
+  if (!response.ok) throw new Error(`Jupiter API answered HTTP ${response.status}`);
   return response.json();
 }
 
@@ -58,7 +73,7 @@ export async function getAmmLabels(): Promise<Record<string, string>> {
   const cached = await cacheGet<Record<string, string>>('jup:amm-labels');
   if (cached) return cached;
   try {
-    const labels = await getJson(`${JUP_API}/swap/v1/program-id-to-label`);
+    const labels = await getJson(`${JUP_API}/swap/v2/program-id-to-label`);
     await cacheSet('jup:amm-labels', labels, 24 * 3600_000);
     return labels;
   } catch {
@@ -82,7 +97,8 @@ export async function getQuote(params: {
   slippageBps: number;
   exactOut?: boolean;
 }): Promise<FreshQuote> {
-  const url = new URL(`${JUP_API}/swap/v1/quote`);
+  // An order without a taker is a quote.
+  const url = new URL(`${JUP_API}/swap/v2/order`);
   url.searchParams.set('inputMint', params.inputMint);
   url.searchParams.set('outputMint', params.outputMint);
   url.searchParams.set('amount', params.amount.toString());

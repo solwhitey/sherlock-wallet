@@ -161,12 +161,15 @@ export class SherlockWallet implements Wallet {
     this.#rpc = rpc;
   }
 
-  #connect: StandardConnectMethod = async () => {
+  // `silent` is how dapps reconnect on page load: Sherlock answers it from the sites already
+  // approved, without opening a window, and returns no accounts otherwise.
+  #connect: StandardConnectMethod = async ({ silent } = {}) => {
     const accounts = (await this.#rpc.callMethod('connect', [
-      { origin: window.location.origin, key: requestKey() },
-    ])) as { publicKey: Uint8Array }[];
+      { origin: window.location.origin, key: requestKey(), silent: !!silent },
+    ])) as { publicKey: Uint8Array }[] | null;
 
     if (accounts === null) {
+      if (silent) return { accounts: [] };
       throw new Error(REJECTED);
     }
 
@@ -181,6 +184,8 @@ export class SherlockWallet implements Wallet {
 
   #disconnect: StandardDisconnectMethod = async () => {
     this.#accounts = [];
+    this.#emit('change', { accounts: this.accounts });
+    await this.#rpc.callMethod('disconnect', [{ origin: window.location.origin }]);
   };
 
   // Sherlock holds no keys: every request opens the inspector and is rejected once it closes.

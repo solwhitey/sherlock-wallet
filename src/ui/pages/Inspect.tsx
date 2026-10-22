@@ -10,15 +10,14 @@ import { useAccounts } from '../hooks/useAccounts';
 import { AddressLink, InstructionsTab, LogsTab, RawTab } from '../inspect/Details';
 import { jsonReplacer, shortAddress, timeAgo } from '../inspect/format';
 import {
-  ChecksStrip,
+  BalanceCard,
+  ChecksCard,
   ErrorBanner,
-  ExecutionPanel,
-  FeesPanel,
+  ExecutionCard,
+  JupiterCard,
   QuoteState,
-  ResourcesPanel,
-  RoutePanel,
+  ResourcesCard,
   SeriesPoint,
-  TradePanel,
 } from '../inspect/Summary';
 import { RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
@@ -223,25 +222,27 @@ const TxInspector: FC<{
             {tab === 'summary' ? (
               <div className="space-y-2.5">
                 <ErrorBanner a={analysis} />
-                <div className="grid grid-cols-2 gap-2.5">
-                  <TradePanel a={analysis} />
-                  <ExecutionPanel
-                    a={analysis}
-                    quote={analysis.jupiter[0] ? quotes[analysis.jupiter[0].path] : undefined}
-                    onRequote={() => analysis.jupiter[0] && requote(analysis, analysis.jupiter[0].path)}
-                  />
+                <div className="grid grid-cols-2 items-start gap-2.5">
+                  <BalanceCard a={analysis} />
+                  <div className="space-y-2.5">
+                    <ResourcesCard a={analysis} />
+                    <ChecksCard
+                      a={analysis}
+                      renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
+                    />
+                  </div>
                 </div>
                 {analysis.jupiter.map((swap) => (
-                  <RoutePanel key={swap.path} a={analysis} swap={swap} series={series[swap.path] ?? []} />
+                  <JupiterCard
+                    key={swap.path}
+                    a={analysis}
+                    swap={swap}
+                    series={series[swap.path] ?? []}
+                    quote={quotes[swap.path]}
+                    onRequote={() => requote(analysis, swap.path)}
+                  />
                 ))}
-                <div className="grid grid-cols-2 gap-2.5">
-                  <FeesPanel a={analysis} />
-                  <ResourcesPanel a={analysis} />
-                </div>
-                <ChecksStrip
-                  a={analysis}
-                  renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
-                />
+                {!analysis.jupiter.length ? <ExecutionCard a={analysis} /> : null}
               </div>
             ) : null}
             {tab === 'instructions' ? <InstructionsTab a={analysis} /> : null}
@@ -338,7 +339,7 @@ export const Inspect: FC = () => {
         ) : null}
       </header>
 
-      <main className="flex-1 px-4 pb-4 pt-3">
+      <main className="flex-1 px-5 pb-4 pt-3">
         {request === undefined ? <Skeleton /> : null}
         {request === null ? <p className="text-sm text-ink-2">This request is no longer in the history.</p> : null}
         {request?.kind === 'message' ? <MessageView request={request} /> : null}
@@ -361,7 +362,7 @@ export const Inspect: FC = () => {
         ) : null}
       </main>
 
-      <footer className="sticky bottom-0 border-t border-line bg-canvas px-4 py-2.5">
+      <footer className="sticky bottom-0 border-t border-line bg-canvas px-5 py-3">
         <Button kind="dark" size="md" className="w-full" onClick={() => window.close()}>
           {request?.method === 'paste' ? 'Done' : 'Reject and close'}
         </Button>

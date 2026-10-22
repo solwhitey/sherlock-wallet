@@ -82,6 +82,21 @@ async function setConnectedAccounts(accounts: { publicKey: Uint8Array }[] | null
   });
 }
 
+// Sites the user approved: they reconnect without a window, like a trusted site in other wallets,
+// until they disconnect.
+async function approvedOrigins(): Promise<string[]> {
+  const { approvedOrigins } = await chrome.storage.local.get('approvedOrigins');
+  return (approvedOrigins as string[] | undefined) ?? [];
+}
+
+async function setApproved(origin: string, approved: boolean) {
+  const origins = (await approvedOrigins()).filter((o) => o !== origin);
+  await chrome.storage.local.set({ approvedOrigins: approved ? [...origins, origin] : origins });
+}
+
+// One approval window at a time: a second connect (another tab, a double click) waits for it.
+let approvalInFlight: Promise<{ publicKey: Uint8Array }[] | null> | undefined;
+
 async function inspect(key: string | undefined, request: Parameters<typeof saveRequest>[0]) {
   return keepAlive(async () => {
     const { popupClosed } = await requestWindow(key, async () => {
@@ -140,23 +155,40 @@ chrome.runtime.onConnect.addListener((port) => {
     const transport = createPortTransport(port);
     const rpc = createRPC(transport);
 
-    rpc.exposeMethod('connect', async ([{ origin, key } = {} as { origin?: string; key?: string }]) =>
-      keepAlive(async () => {
-        const { closePopup, popupClosed, tabId } = await requestWindow(key, () =>
-          openPopup('approveConnection', origin ? { origin } : {})
-        );
-        if (tabId === undefined) throw new Error('approval window has no tab');
+    rpc.exposeMethod(
+      'connect',
+      async ([{ origin, key, silent } = {} as { origin?: string; key?: string; silent?: boolean }]) => {
+        const current = await getConnectedAccounts();
+        const trusted = !!origin && (await approvedOrigins()).includes(origin) && !!current?.length;
+        if (trusted) return current;
+        if (silent) return null;
 
-        // A reused window reconnects its port after a restart; wait for it (or for it to close).
-        const approval = await Promise.race([popupRPC(tabId).get(), popupClosed]);
-        const response = approval ? await Promise.race([approval.callMethod('connect'), popupClosed]) : null;
+        approvalInFlight ??= keepAlive(async () => {
+          const { closePopup, popupClosed, tabId } = await requestWindow(key, () =>
+            openPopup('approveConnection', origin ? { origin } : {})
+          );
+          if (tabId === undefined) throw new Error('approval window has no tab');
 
-        await setConnectedAccounts(response);
-        await forgetWindow(key);
-        closePopup();
+          // A reused window reconnects its port after a restart; wait for it (or for it to close).
+          const approval = await Promise.race([popupRPC(tabId).get(), popupClosed]);
+          const response = approval ? await Promise.race([approval.callMethod('connect'), popupClosed]) : null;
+
+          await setConnectedAccounts(response);
+          await forgetWindow(key);
+          closePopup();
+          return response;
+        }).finally(() => {
+          approvalInFlight = undefined;
+        });
+        const response = await approvalInFlight;
+        if (response && origin) await setApproved(origin, true);
         return response;
-      })
+      }
     );
+
+    rpc.exposeMethod('disconnect', async ([{ origin } = {} as { origin?: string }]) => {
+      if (origin) await setApproved(origin, false);
+    });
 
     rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, origin, key }]) =>
       inspect(key, {

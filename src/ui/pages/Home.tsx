@@ -10,6 +10,8 @@ import { CheckIcon, ChevronLeft, SettingsIcon } from '../kit/icons';
 import { AddressAvatar, Button, CopyButton, IconButton, Row, Segmented } from '../kit/kit';
 import { rpc } from '../rpc';
 import { getTheme, setTheme, ThemeChoice } from '../theme';
+import { useLocalStorage } from '../hooks/useLocalStorage';
+import { JUP_KEY_STORAGE } from '../../sim/jupApi';
 
 type View = 'home' | 'add' | 'settings';
 
@@ -45,6 +47,43 @@ const ViewingAs: FC = () => {
         </div>
         <CopyButton text={address} label="Copy address" />
       </div>
+    </div>
+  );
+};
+
+const JupiterKey: FC = () => {
+  const [key, setKey] = useLocalStorage<string>(JUP_KEY_STORAGE, '');
+  const [draft, setDraft] = useState(key);
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">Jupiter API key</h2>
+      <p className="mb-3 text-xs text-ink-2">
+        Optional. Prices, token info and fresh quotes come from api.jup.ag, which allows 0.5 requests per second without
+        a key. Get one at portal.jup.ag.
+      </p>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setKey(draft.trim());
+        }}
+      >
+        <input
+          className="field mono text-xs"
+          placeholder="x-api-key"
+          type="password"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <Button type="submit" kind="dark" disabled={draft.trim() === key}>
+          Save
+        </Button>
+      </form>
+      {key ? (
+        <p className="mt-2 flex items-center gap-1.5 text-xs text-pos">
+          <CheckIcon size={13} /> Key saved on this device
+        </p>
+      ) : null}
     </div>
   );
 };
@@ -114,6 +153,8 @@ const Settings: FC<{ onBack: () => void }> = ({ onBack }) => {
             </p>
           ) : null}
         </div>
+
+        <JupiterKey />
 
         <div>
           <h2 className="text-lg font-semibold">History</h2>
