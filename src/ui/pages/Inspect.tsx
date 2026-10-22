@@ -11,12 +11,13 @@ import { AddressLink, InstructionsTab, LogsTab, RawTab } from '../inspect/Detail
 import { jsonReplacer, shortAddress, timeAgo } from '../inspect/format';
 import {
   BalanceCard,
-  ChecksCard,
+  ChecksSection,
   ErrorBanner,
   ExecutionCard,
-  JupiterCard,
+  FeesSection,
+  OthersSection,
   QuoteState,
-  ResourcesCard,
+  RouteSection,
   SeriesPoint,
 } from '../inspect/Summary';
 import { RefreshIcon, XIcon } from '../kit/icons';
@@ -220,29 +221,25 @@ const TxInspector: FC<{
         <>
           <div key={tab} className="fade-in">
             {tab === 'summary' ? (
-              <div className="space-y-2.5">
+              <div className="space-y-3">
                 <ErrorBanner a={analysis} />
-                <div className="grid grid-cols-2 items-start gap-2.5">
-                  <BalanceCard a={analysis} />
-                  <div className="space-y-2.5">
-                    <ResourcesCard a={analysis} />
-                    <ChecksCard
-                      a={analysis}
-                      renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
-                    />
-                  </div>
-                </div>
-                {analysis.jupiter.map((swap) => (
-                  <JupiterCard
-                    key={swap.path}
+                <BalanceCard a={analysis} />
+                <ExecutionCard
+                  a={analysis}
+                  quote={analysis.jupiter[0] ? quotes[analysis.jupiter[0].path] : undefined}
+                  onRequote={() => analysis.jupiter[0] && requote(analysis, analysis.jupiter[0].path)}
+                />
+                <div className="pt-1">
+                  {analysis.jupiter.map((swap) => (
+                    <RouteSection key={swap.path} a={analysis} swap={swap} series={series[swap.path] ?? []} />
+                  ))}
+                  <FeesSection a={analysis} />
+                  <ChecksSection a={analysis} />
+                  <OthersSection
                     a={analysis}
-                    swap={swap}
-                    series={series[swap.path] ?? []}
-                    quote={quotes[swap.path]}
-                    onRequote={() => requote(analysis, swap.path)}
+                    renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
                   />
-                ))}
-                {!analysis.jupiter.length ? <ExecutionCard a={analysis} /> : null}
+                </div>
               </div>
             ) : null}
             {tab === 'instructions' ? <InstructionsTab a={analysis} /> : null}

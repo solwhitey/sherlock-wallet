@@ -5,7 +5,7 @@ import type { FreshQuote } from '../../sim/jupApi';
 import type { JupiterSwap } from '../../sim/jupiter';
 import { WSOL_MINT } from '../../sim/programs';
 import { ChevronDown, RefreshIcon } from '../kit/icons';
-import { Button, Collapse, Dot, TokenIcon, Tone, toneText } from '../kit/kit';
+import { Button, Collapse, Dot, Pill, Section, TokenIcon, Tone, toneText } from '../kit/kit';
 import {
   formatAmount,
   formatBps,
@@ -25,27 +25,33 @@ export type SeriesPoint = { t: number; amount?: bigint; failed: boolean };
 const bpsTone = (bps?: number): Tone | undefined =>
   bps === undefined ? undefined : bps > 0.05 ? 'pos' : bps < -0.05 ? 'neg' : undefined;
 
-// What the fee payer spends on the network, so a SOL change made only of fees reads as a fee line
-// rather than as a balance change.
-function networkCost(a: Analysis) {
-  return a.user === a.feePayer ? (a.fees.total ?? a.fees.base + a.fees.priority) + a.fees.jitoTip : 0n;
-}
-
+const totalFee = (a: Analysis) => (a.fees.total ?? a.fees.base + a.fees.priority) + a.fees.jitoTip;
 const solUsd = (a: Analysis, lamports: bigint) => formatUsd(usdValue({ mint: SOL, decimals: 9 }, lamports, a.tokens));
+
+// Unix timestamps in error values and quotes read better as times.
+const looksLikeTimestamp = (v: number) => v > 1_500_000_000 && v < 2_500_000_000;
+const clock = (seconds: number) => new Date(seconds * 1000).toLocaleTimeString([], { hour12: false });
+function relative(seconds: number) {
+  const abs = Math.abs(seconds);
+  const text = abs < 120 ? `${abs}s` : abs < 7200 ? `${Math.round(abs / 60)} min` : `${Math.round(abs / 3600)} h`;
+  return seconds < 0 ? `${text} ago` : `in ${text}`;
+}
 
 // ---- Building blocks ------------------------------------------------------------------------------
 
-const Card: FC<{ title: ReactNode; right?: ReactNode; className?: string; children: ReactNode }> = ({
+const Card: FC<{ title?: ReactNode; right?: ReactNode; className?: string; children: ReactNode }> = ({
   title,
   right,
   className,
   children,
 }) => (
-  <section className={clsx('rounded-card border border-line bg-raised px-5 py-3.5', className)}>
-    <div className="mb-2 flex min-h-[28px] items-center gap-3">
-      <h2 className="truncate text-[15px] font-semibold">{title}</h2>
-      {right ? <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div> : null}
-    </div>
+  <section className={clsx('rounded-card border border-line bg-raised px-5 py-4', className)}>
+    {title || right ? (
+      <div className="mb-2 flex min-h-[28px] items-center gap-3">
+        <h2 className="truncate text-[15px] font-semibold">{title}</h2>
+        {right ? <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div> : null}
+      </div>
+    ) : null}
     {children}
   </section>
 );
@@ -83,29 +89,67 @@ const Meter: FC<{ label: ReactNode; value: number; max: number; text: ReactNode 
   );
 };
 
-const Toggle: FC<{ open: boolean; onClick: () => void; children: ReactNode; className?: string }> = ({
-  open,
-  onClick,
-  children,
-  className,
-}) => (
-  <button
-    type="button"
-    onClick={onClick}
-    className={clsx(
-      'inline-flex items-center gap-1 text-[13px] font-semibold text-ink-2 underline-offset-2 hover:text-ink hover:underline',
-      className
-    )}
-  >
-    {children}
-    <ChevronDown size={14} className={clsx('transition-transform duration-[var(--dur-2)]', open && 'rotate-180')} />
-  </button>
-);
+// ---- Error ------------------------------------------------------------------------------------------
+
+const ErrorValue: FC<{ side: string; value: string }> = ({ side, value }) => {
+  const n = Number(value);
+  return (
+    <span>
+      <span className="text-ink-3">{side}</span> <span className="font-semibold text-ink">{value}</span>
+      {Number.isFinite(n) && looksLikeTimestamp(n) ? <span className="text-ink-3"> ({clock(n)})</span> : null}
+    </span>
+  );
+};
+
+export const ErrorBanner: FC<{ a: Analysis }> = ({ a }) => {
+  const e = a.error;
+  if (!e) return null;
+  const swap = a.jupiter[0];
+  const rfqExpired = a.rfq?.secondsLeft !== undefined && a.rfq.secondsLeft < 0;
+  const left = Number(e.left);
+  const right = Number(e.right);
+  const timeGap = looksLikeTimestamp(left) && looksLikeTimestamp(right) ? right - left : undefined;
+  return (
+    <div className="rounded-card bg-neg-soft px-5 py-3.5">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <span className="text-[15px] font-semibold text-neg">{e.name ?? 'Simulation failed'}</span>
+        {e.customCode !== undefined ? <span className="text-xs text-ink-3">#{e.customCode}</span> : null}
+      </div>
+      <div className="mt-0.5 break-words text-[13px] text-ink-2">
+        {e.msg ? `${e.msg} · ` : ''}
+        {a.labels[e.programId ?? ''] ?? e.programId ?? ''}
+        {e.location ? <span className="mono text-ink-3"> · {e.location.split('/').slice(-2).join('/')}</span> : null}
+        {e.account ? <span> · account {e.account}</span> : null}
+        {!e.msg && !e.name ? e.text : null}
+      </div>
+      {e.left !== undefined || e.right !== undefined ? (
+        <div className="mt-1.5 flex flex-wrap gap-x-4 text-[13px]">
+          {e.left !== undefined ? <ErrorValue side="Left" value={e.left} /> : null}
+          {e.right !== undefined ? <ErrorValue side="Right" value={e.right} /> : null}
+          {timeGap !== undefined ? <span className="text-ink-2">{Math.abs(timeGap)}s apart</span> : null}
+        </div>
+      ) : null}
+      {rfqExpired ? (
+        <div className="mt-1.5 text-[13px]">
+          The market maker's quote expired <b className="text-neg">{relative(a.rfq!.secondsLeft!)}</b> (at{' '}
+          {clock(a.rfq!.expireAt!)}). RFQ quotes only live a few seconds: ask the dapp for a new one.
+        </div>
+      ) : null}
+      {swap?.unbounded ? (
+        <div className="mt-1.5 text-[13px]">
+          Without the limit the route fills {formatBps(swap.unbounded.vsQuoteBps)} vs quote, which is{' '}
+          <b className="text-neg">{formatBps(Math.abs(swap.unbounded.vsLimitBps)).replace(/^[+−]/, '')}</b> past your{' '}
+          {swap.exactOut ? 'maximum input' : 'minimum output'}.
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 // ---- Balance changes ------------------------------------------------------------------------------
 
 function displayChanges(a: Analysis) {
-  const cost = networkCost(a);
+  const cost = a.user === a.feePayer ? totalFee(a) : 0n;
   // SOL and wSOL moving in opposite directions is wrapping or unwrapping, not two trades.
   let changes = a.userChanges;
   const sol = changes.find((c) => c.mint === SOL);
@@ -135,14 +179,14 @@ function assetName(asset: AssetDelta, a: Analysis) {
 const AssetRow: FC<{ asset: AssetDelta; a: Analysis; note?: string }> = ({ asset, a, note }) => {
   const usd = usdValue(asset, asset.delta, a.tokens);
   return (
-    <div className="flex items-center gap-3 py-2">
+    <div className="flex items-center gap-3 py-2.5">
       <TokenIcon src={iconOf(asset.mint, a.tokens)} size={36} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-[15px] font-semibold">{symbolOf(asset.mint, a.tokens)}</div>
         <div className="truncate text-xs text-ink-3">{note ?? assetName(asset, a)}</div>
       </div>
       <div className="text-right">
-        <div className={clsx('text-[16px] font-semibold', toneOf(asset.delta))}>
+        <div className={clsx('text-[17px] font-semibold', toneOf(asset.delta))}>
           {formatAmount(asset.delta, asset.decimals, { signed: true, maxFraction: asset.decimals > 6 ? 6 : 4 })}
         </div>
         <div className={clsx('text-xs', toneOf(usd))}>{formatUsd(usd, { signed: true }) || ' '}</div>
@@ -174,6 +218,8 @@ export const BalanceCard: FC<{ a: Analysis }> = ({ a }) => {
   const { changes, notes, cost } = displayChanges(a);
   const ordered = [...changes.filter((c) => c.delta < 0n), ...changes.filter((c) => c.delta > 0n)];
   const p = prices(a);
+  const fee = totalFee(a);
+  const payer = a.feePayer && a.feePayer !== a.user ? (a.labels[a.feePayer] ?? shortAddress(a.feePayer)) : undefined;
   return (
     <Card
       title={
@@ -189,27 +235,224 @@ export const BalanceCard: FC<{ a: Analysis }> = ({ a }) => {
           ))}
         </div>
       ) : (
-        <p className="text-sm text-ink-2">
+        <p className="py-1 text-sm text-ink-2">
           {a.err ? 'Nothing moves: the transaction reverts.' : 'Nothing moves in or out of this address.'}
         </p>
       )}
-      {p ? (
-        <div className="mt-2 truncate text-xs text-ink-2">
-          {p.unit} = <span className="font-semibold text-ink">{p.effective}</span>
-          {p.market ? <span className="text-ink-3"> · market {p.market}</span> : null}
-        </div>
-      ) : null}
-      <NetworkFees a={a} paysFees={cost > 0n} />
+      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-line pt-2.5 text-xs text-ink-2">
+        <span className="truncate">
+          {p ? (
+            <>
+              {p.unit} = <span className="font-semibold text-ink">{p.effective}</span>
+              {p.market ? <span className="text-ink-3"> · market {p.market}</span> : null}
+            </>
+          ) : null}
+        </span>
+        <span className="truncate">
+          Network fee{' '}
+          <span className={clsx('font-semibold', cost > 0n ? 'text-neg' : 'text-ink')}>
+            {cost > 0n ? '−' : ''}
+            {lamportsToSol(fee)} SOL
+          </span>
+          {solUsd(a, fee) ? <span className="text-ink-3"> · {solUsd(a, fee)}</span> : null}
+          {payer ? <span className="text-ink-3"> · paid by {payer}</span> : null}
+        </span>
+      </div>
     </Card>
   );
 };
 
-// ---- Jupiter -----------------------------------------------------------------------------------------
+// ---- Execution --------------------------------------------------------------------------------------
+
+export const ExecutionCard: FC<{ a: Analysis; quote?: QuoteState; onRequote: () => void }> = ({
+  a,
+  quote,
+  onRequote,
+}) => {
+  const j = a.jupiter[0];
+  const rfq = a.rfq;
+  const otherSigners = a.signers.filter((s) => s !== a.user);
+  const via = a.programs.map((id) => a.labels[id] ?? shortAddress(id));
+
+  if (j) {
+    const decimals = (j.exactOut ? j.inputDecimals : j.outputDecimals) ?? 0;
+    const sym = symbolOf((j.exactOut ? j.inputMint : j.outputMint) ?? '', a.tokens);
+    const simulated = j.exactOut ? j.inAmount : j.outAmount;
+    const fresh = quote?.quote;
+    const freshAmount = fresh ? (j.exactOut ? fresh.inAmount : fresh.outAmount) : undefined;
+    const freshVsTx =
+      freshAmount !== undefined && simulated
+        ? (((j.exactOut ? -1 : 1) * Number(freshAmount - simulated)) / Number(simulated)) * 10_000
+        : undefined;
+    return (
+      <Card
+        title={
+          <>
+            Execution <span className="font-normal text-ink-2">· Jupiter {j.exactOut ? 'exact out' : 'route'}</span>
+          </>
+        }
+        right={
+          <Button
+            kind="outline"
+            size="sm"
+            onClick={onRequote}
+            disabled={quote?.loading || !j.inputMint || !j.outputMint}
+          >
+            <RefreshIcon size={12} className={quote?.loading ? 'animate-spin' : ''} />
+            {fresh ? 'Re-quote' : 'Fresh quote'}
+          </Button>
+        }
+      >
+        <div className="grid grid-cols-4 gap-x-5">
+          {j.failed ? (
+            <Stat
+              label="Short of limit"
+              value={j.unbounded ? `−${formatBps(Math.abs(j.unbounded.vsLimitBps)).replace(/^[+−]/, '')}` : 'Reverts'}
+              tone="neg"
+              sub={j.unbounded ? `fills ${formatBps(j.unbounded.vsQuoteBps)} vs quote` : undefined}
+            />
+          ) : (
+            <Stat
+              label="vs quote"
+              value={formatBps(j.vsQuoteBps) || '—'}
+              tone={bpsTone(j.vsQuoteBps)}
+              sub="simulated fill"
+            />
+          )}
+          <Stat
+            label="vs market"
+            value={formatBps(j.vsMarketBps) || '—'}
+            tone={bpsTone(j.vsMarketBps)}
+            sub={j.inUsd !== undefined ? `${formatUsd(j.inUsd)} → ${formatUsd(j.outUsd) || '—'}` : 'no price'}
+          />
+          <Stat
+            label={j.exactOut ? 'Room to max in' : 'Room to min out'}
+            value={
+              j.headroomUsd !== undefined
+                ? formatUsd(j.headroomUsd)
+                : j.headroom !== undefined
+                  ? formatAmount(j.headroom, decimals)
+                  : '—'
+            }
+            sub={j.headroom !== undefined ? `${formatAmount(j.headroom, decimals)} ${sym}` : undefined}
+            title="How much worse the fill can get before the swap reverts; also what a sandwich could take."
+          />
+          <Stat label="Slippage" value={formatPct(j.slippageBps)} sub={`platform fee ${formatPct(j.platformFeeBps)}`} />
+        </div>
+        {fresh || quote?.error ? (
+          <div className="mt-3 rounded-xl bg-tint px-3.5 py-2 text-[13px]">
+            {fresh ? (
+              <div className="flex flex-wrap items-baseline gap-x-2">
+                <span className="text-ink-2">Fresh quote now</span>
+                <span className="font-semibold">
+                  {formatAmount(freshAmount!, decimals)} {sym}
+                </span>
+                {freshVsTx !== undefined ? (
+                  <span className={toneText[bpsTone(freshVsTx) ?? 'muted']}>
+                    {formatBps(freshVsTx)} vs this transaction
+                  </span>
+                ) : null}
+                <span className="w-full truncate text-xs text-ink-3">
+                  {fresh.route.join(' · ')} · impact {(fresh.priceImpactPct * 100).toFixed(3)}%
+                </span>
+              </div>
+            ) : (
+              <span className="text-neg">Quote failed: {quote?.error}</span>
+            )}
+          </div>
+        ) : null}
+      </Card>
+    );
+  }
+
+  if (rfq) {
+    const inDec = rfq.inputMint ? a.tokens[rfq.inputMint]?.decimals : undefined;
+    const outDec = rfq.outputMint
+      ? (a.tokens[rfq.outputMint]?.decimals ?? (rfq.outputMint === WSOL_MINT ? 9 : undefined))
+      : undefined;
+    const amount = (v: bigint | undefined, d: number | undefined, mint?: string) =>
+      v === undefined
+        ? '—'
+        : `${d !== undefined ? formatAmount(v, d, { maxFraction: 2 }) : v.toString()} ${mint ? symbolOf(mint, a.tokens) : ''}`;
+    const expired = rfq.secondsLeft !== undefined && rfq.secondsLeft < 0;
+    return (
+      <Card
+        title={
+          <>
+            Execution <span className="font-normal text-ink-2">· RFQ quote from a market maker</span>
+          </>
+        }
+      >
+        <div className="grid grid-cols-4 gap-x-5">
+          <Stat label="You pay" value={amount(rfq.inputAmount, inDec, rfq.inputMint)} />
+          <Stat label="You receive" value={amount(rfq.outputAmount, outDec, rfq.outputMint)} />
+          <Stat
+            label="Quote expires"
+            value={rfq.secondsLeft !== undefined ? relative(rfq.secondsLeft) : '—'}
+            tone={expired ? 'neg' : rfq.secondsLeft !== undefined && rfq.secondsLeft < 10 ? 'warn' : undefined}
+            sub={rfq.expireAt ? `at ${clock(rfq.expireAt)}` : undefined}
+          />
+          <Stat
+            label="Market maker"
+            value={rfq.maker ? (a.labels[rfq.maker] ?? shortAddress(rfq.maker)) : '—'}
+            sub={
+              a.swap?.vsMarketBps !== undefined ? (
+                <span className={toneText[bpsTone(a.swap.vsMarketBps) ?? 'muted']}>
+                  {formatBps(a.swap.vsMarketBps)} vs market
+                </span>
+              ) : (
+                'pays the network fee'
+              )
+            }
+          />
+        </div>
+      </Card>
+    );
+  }
+
+  const p = prices(a);
+  return (
+    <Card title={a.swap ? 'Execution' : 'Programs'}>
+      <div className="grid grid-cols-4 gap-x-5">
+        {a.swap ? (
+          <>
+            <Stat
+              label="vs market"
+              value={formatBps(a.swap.vsMarketBps) || '—'}
+              tone={bpsTone(a.swap.vsMarketBps)}
+              sub={
+                a.swap.soldUsd !== undefined
+                  ? `${formatUsd(a.swap.soldUsd)} → ${formatUsd(a.swap.boughtUsd) || '—'}`
+                  : 'no price'
+              }
+            />
+            <Stat
+              label={`Price · ${p?.unit ?? ''}`}
+              value={p?.effective ?? '—'}
+              sub={p?.market ? `market ${p.market}` : undefined}
+            />
+          </>
+        ) : null}
+        <Stat
+          className={a.swap ? '' : 'col-span-2'}
+          label="Route via"
+          value={via.length ? via.join(' · ') : 'Built-in programs only'}
+        />
+        <Stat
+          label={a.swap ? 'Filled by' : 'Also signed by'}
+          value={otherSigners.length ? otherSigners.map((s) => a.labels[s] ?? shortAddress(s)).join(', ') : '—'}
+        />
+      </div>
+    </Card>
+  );
+};
+
+// ---- Accordions -------------------------------------------------------------------------------------
 
 const Sparkline: FC<{ series: SeriesPoint[]; quoted?: bigint; limit?: bigint }> = ({ series, quoted, limit }) => {
   const points = series.filter((p) => p.amount !== undefined) as { t: number; amount: bigint }[];
   if (points.length < 2)
-    return <div className="flex h-9 items-center text-xs text-ink-3">Fills in as it re-simulates…</div>;
+    return <div className="flex h-10 items-center text-xs text-ink-3">Fills in as it re-simulates…</div>;
   const values = [
     ...points.map((p) => Number(p.amount)),
     ...(quoted ? [Number(quoted)] : []),
@@ -218,12 +461,12 @@ const Sparkline: FC<{ series: SeriesPoint[]; quoted?: bigint; limit?: bigint }> 
   const min = Math.min(...values);
   const span = Math.max(...values) - min || 1;
   const w = 480;
-  const h = 36;
+  const h = 40;
   const y = (v: number) => h - 4 - ((v - min) / span) * (h - 8);
   const x = (i: number) => (i / (points.length - 1)) * w;
   const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(Number(p.amount)).toFixed(1)}`).join(' ');
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="h-9 w-full" preserveAspectRatio="none">
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-10 w-full" preserveAspectRatio="none">
       {quoted ? (
         <line
           x1={0}
@@ -251,13 +494,7 @@ const Sparkline: FC<{ series: SeriesPoint[]; quoted?: bigint; limit?: bigint }> 
   );
 };
 
-export const JupiterCard: FC<{
-  a: Analysis;
-  swap: JupiterSwap;
-  series: SeriesPoint[];
-  quote?: QuoteState;
-  onRequote: () => void;
-}> = ({ a, swap, series, quote, onRequote }) => {
+export const RouteSection: FC<{ a: Analysis; swap: JupiterSwap; series: SeriesPoint[] }> = ({ a, swap, series }) => {
   const [showHops, setShowHops] = useState(false);
   const inSym = swap.inputMint ? symbolOf(swap.inputMint, a.tokens) : '?';
   const outSym = swap.outputMint ? symbolOf(swap.outputMint, a.tokens) : '?';
@@ -269,139 +506,69 @@ export const JupiterCard: FC<{
   const quoted = swap.exactOut ? swap.quotedInAmount : swap.quotedOutAmount;
   const limit = swap.exactOut ? swap.maxInAmount : swap.minOutAmount;
   const simulated = swap.exactOut ? swap.inAmount : swap.outAmount;
-  const decimals = (swap.exactOut ? swap.inputDecimals : swap.outputDecimals) ?? 0;
-
-  const fresh = quote?.quote;
-  const freshAmount = fresh ? (swap.exactOut ? fresh.inAmount : fresh.outAmount) : undefined;
-  const freshVsTx =
-    freshAmount !== undefined && simulated
-      ? (((swap.exactOut ? -1 : 1) * Number(freshAmount - simulated)) / Number(simulated)) * 10_000
-      : undefined;
+  const venues = [...new Set(swap.hops.map((h) => h.label))];
 
   return (
-    <Card
-      title={
-        <>
-          Jupiter swap{' '}
-          <span className="font-normal text-ink-2">
-            · {swap.instruction}
-            {swap.exactOut ? ' · exact out' : ''}
-          </span>
-        </>
-      }
-      right={
-        <>
-          {swap.hops.length ? (
-            <Toggle open={showHops} onClick={() => setShowHops(!showHops)}>
-              {swap.hops.length} hops
-            </Toggle>
-          ) : null}
-          <Button
-            kind="outline"
-            size="sm"
-            onClick={onRequote}
-            disabled={quote?.loading || !swap.inputMint || !swap.outputMint}
-          >
-            <RefreshIcon size={12} className={quote?.loading ? 'animate-spin' : ''} />
-            {fresh ? 'Re-quote' : 'Fresh quote'}
-          </Button>
-        </>
-      }
+    <Section
+      title="Jupiter route"
+      summary={`${swap.instruction} · ${venues.length ? venues.slice(0, 3).join(', ') + (venues.length > 3 ? '…' : '') : `${swap.route.length} steps`}`}
     >
-      <div className="grid grid-cols-3 gap-x-5 gap-y-3">
+      <div className="grid grid-cols-4 gap-x-5">
         <Stat label={`Quoted ${side}`} value={fmt(quoted, side)} />
         <Stat
           label={`Simulated ${side}`}
           value={swap.failed ? <span className="text-neg">Reverts</span> : fmt(simulated, side)}
           sub={
-            swap.failed && swap.unbounded ? (
-              <span className="text-neg">fills {formatBps(swap.unbounded.vsQuoteBps)} vs quote</span>
-            ) : swap.vsQuoteBps !== undefined ? (
-              <span className={toneText[bpsTone(swap.vsQuoteBps) ?? 'muted']}>
-                {formatBps(swap.vsQuoteBps)} vs quote
-              </span>
+            swap.vsQuoteBps !== undefined ? (
+              <span className={toneText[bpsTone(swap.vsQuoteBps) ?? 'muted']}>{formatBps(swap.vsQuoteBps)}</span>
             ) : undefined
           }
         />
         <Stat
-          label={`${swap.exactOut ? 'Max in' : 'Min out'} · ${formatPct(swap.slippageBps)} slippage`}
+          label={`${swap.exactOut ? 'Max in' : 'Min out'} (${formatPct(swap.slippageBps)})`}
           value={fmt(limit, side)}
-          sub={
-            swap.headroom !== undefined
-              ? `room ${formatAmount(swap.headroom, decimals)}${swap.headroomUsd !== undefined ? ` · ${formatUsd(swap.headroomUsd)}` : ''}`
-              : undefined
-          }
-          title="How much worse the fill can get before the swap reverts; also what a sandwich could take."
-        />
-        <Stat
-          label="Value in → out"
-          value={`${formatUsd(swap.inUsd) || '—'} → ${formatUsd(swap.outUsd) || '—'}`}
-          sub={
-            swap.vsMarketBps !== undefined ? (
-              <span className={toneText[bpsTone(swap.vsMarketBps) ?? 'muted']}>
-                {formatBps(swap.vsMarketBps)} vs market
-              </span>
-            ) : (
-              'no price'
-            )
-          }
         />
         <Stat
           label="Fees"
           value={`Platform ${formatPct(swap.platformFeeBps)}`}
           sub={
             swap.positiveSlippageBps !== undefined
-              ? `positive slippage cap ${formatPct(swap.positiveSlippageBps)}`
+              ? `pos. slippage cap ${formatPct(swap.positiveSlippageBps)}`
               : undefined
           }
         />
-        <div className="min-w-0">
-          <div className="truncate text-xs text-ink-2">Simulated {side} · live</div>
-          <Sparkline series={series} quoted={quoted} limit={limit} />
-        </div>
       </div>
-
-      {fresh || quote?.error ? (
-        <div className="mt-3 rounded-xl bg-tint px-3.5 py-2 text-[13px]">
-          {fresh ? (
-            <div className="flex flex-wrap items-baseline gap-x-2">
-              <span className="text-ink-2">Fresh quote now</span>
-              <span className="font-semibold">{fmt(freshAmount, side)}</span>
-              {freshVsTx !== undefined ? (
-                <span className={toneText[bpsTone(freshVsTx) ?? 'muted']}>
-                  {formatBps(freshVsTx)} vs this transaction
-                </span>
-              ) : null}
-              <span className="w-full truncate text-xs text-ink-3">
-                {fresh.route.join(' · ')} · impact {(fresh.priceImpactPct * 100).toFixed(3)}%
-              </span>
-            </div>
-          ) : (
-            <span className="text-neg">Quote failed: {quote?.error}</span>
-          )}
-        </div>
-      ) : null}
-
-      {swap.route.length ? (
-        <div className="mt-3 grid grid-cols-3 gap-x-5 gap-y-1.5">
+      <div className="mt-4 grid grid-cols-[1fr_220px] gap-6">
+        <div className="space-y-1.5">
           {swap.route.map((step, i) => (
             <div key={i} className="flex items-center gap-2.5 text-[13px]">
-              <span className="w-20 shrink-0 truncate" title={step.label}>
+              <span className="w-32 shrink-0 truncate" title={step.label}>
                 {step.label}
               </span>
               <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint">
                 <div className="h-full rounded-full bg-accent" style={{ width: `${Math.min(100, step.pct)}%` }} />
               </div>
-              <span className="w-9 shrink-0 text-right text-ink-2">{Number(step.pct.toFixed(0))}%</span>
+              <span className="w-11 shrink-0 text-right text-ink-2">{Number(step.pct.toFixed(1))}%</span>
             </div>
           ))}
         </div>
-      ) : null}
-
+        <div>
+          <div className="text-xs text-ink-2">Simulated {side} · live</div>
+          <Sparkline series={series} quoted={quoted} limit={limit} />
+        </div>
+      </div>
       {swap.hops.length ? (
         <>
+          <button
+            type="button"
+            onClick={() => setShowHops(!showHops)}
+            className="mt-3 inline-flex items-center gap-1 text-[13px] font-semibold text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+          >
+            {showHops ? 'Hide' : 'Show'} the {swap.hops.length} simulated hops
+            <ChevronDown size={14} className={clsx('transition-transform', showHops && 'rotate-180')} />
+          </button>
           <Collapse open={showHops}>
-            <div className="mt-2.5 grid grid-cols-2 gap-x-6">
+            <div className="mt-2 grid grid-cols-2 gap-x-6">
               {swap.hops.map((hop, i) => {
                 const inDec = a.tokens[hop.inputMint]?.decimals ?? (hop.inputMint === WSOL_MINT ? 9 : undefined);
                 const outDec = a.tokens[hop.outputMint]?.decimals ?? (hop.outputMint === WSOL_MINT ? 9 : undefined);
@@ -423,51 +590,9 @@ export const JupiterCard: FC<{
           </Collapse>
         </>
       ) : null}
-    </Card>
+    </Section>
   );
 };
-
-// Swaps that do not go through a Jupiter route (RFQ fills, other routers) and other transactions.
-export const ExecutionCard: FC<{ a: Analysis }> = ({ a }) => {
-  const otherSigners = a.signers.filter((s) => s !== a.user);
-  const via = a.programs.map((id) => a.labels[id] ?? shortAddress(id));
-  const p = prices(a);
-  if (!a.swap && !otherSigners.length && !via.length) return null;
-  return (
-    <Card title={a.swap ? 'Execution' : 'Programs'}>
-      <div className="grid grid-cols-3 gap-x-5 gap-y-3.5">
-        {a.swap ? (
-          <>
-            <Stat
-              label="vs market"
-              value={formatBps(a.swap.vsMarketBps) || '—'}
-              tone={bpsTone(a.swap.vsMarketBps)}
-              sub={
-                a.swap.soldUsd !== undefined
-                  ? `${formatUsd(a.swap.soldUsd)} → ${formatUsd(a.swap.boughtUsd) || '—'}`
-                  : 'no price'
-              }
-            />
-            <Stat label={`Price · ${p?.unit ?? ''}`} value={p?.effective ?? '—'} />
-            <Stat label="Market price" value={p?.market ?? '—'} sub="Jupiter price" />
-          </>
-        ) : null}
-        <Stat
-          className="col-span-2"
-          label="Route via"
-          value={via.length ? via.join(' · ') : 'Built-in programs only'}
-        />
-        <Stat
-          label={a.swap ? 'Filled by' : 'Also signed by'}
-          value={otherSigners.length ? otherSigners.map((s) => a.labels[s] ?? shortAddress(s)).join(', ') : '—'}
-          sub={a.swap && otherSigners.length ? 'market maker co-signs (RFQ)' : undefined}
-        />
-      </div>
-    </Card>
-  );
-};
-
-// ---- Fees & compute ---------------------------------------------------------------------------------
 
 function priorityRank(a: Analysis) {
   const pf = a.priorityFees;
@@ -476,76 +601,47 @@ function priorityRank(a: Analysis) {
   return p >= pf.p90 ? '≥ p90' : p >= pf.p75 ? 'p75–p90' : p >= pf.p50 ? 'p50–p75' : p >= pf.p25 ? 'p25–p50' : '< p25';
 }
 
-// Network costs, shown under the balance changes they are part of.
-const NetworkFees: FC<{ a: Analysis; paysFees: boolean }> = ({ a, paysFees }) => {
+export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
   const { fees, rent, compute } = a;
-  const total = (fees.total ?? fees.base + fees.priority) + fees.jitoTip;
   const rentPaid = rent.created.reduce((s, c) => s + c.lamports, 0n);
   const rentBack = rent.closed.reduce((s, c) => s + c.lamports, 0n);
   const rentNet = rentBack - rentPaid;
   const rank = priorityRank(a);
+  const mib = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MiB`;
   return (
-    <div className="mt-3 border-t border-line pt-3">
-      <div className="mb-2 flex items-baseline justify-between text-xs">
-        <span className="font-semibold text-ink">Network fees{paysFees ? '' : ' · paid by another fee payer'}</span>
-        <span className="text-ink-3">{solUsd(a, total)}</span>
-      </div>
-      <div className="grid grid-cols-2 gap-x-5 gap-y-2.5">
+    <Section
+      title="Fees & compute"
+      summary={`${lamportsToSol(totalFee(a))} SOL · ${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()} CU · ${a.size} B`}
+    >
+      <div className="grid grid-cols-4 gap-x-5">
         <Stat
-          label="Total"
-          value={
-            paysFees ? <span className="text-neg">−{lamportsToSol(total)} SOL</span> : `${lamportsToSol(total)} SOL`
-          }
-          sub={`priority ${lamportsToSol(fees.priority)}`}
+          label="Base"
+          value={lamportsToSol(fees.base)}
+          sub={`${a.signers.length} signature${a.signers.length > 1 ? 's' : ''}`}
         />
         <Stat
-          label={a.v1Config ? 'Priority · v1 header' : 'Priority price'}
-          value={
-            a.v1Config
-              ? `${(a.v1Config.priorityFeeLamports ?? 0n).toLocaleString()} lamports`
-              : `${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU`
-          }
+          label={a.v1Config ? 'Priority · v1 header' : 'Priority'}
+          value={lamportsToSol(fees.priority)}
           sub={
             a.v1Config
-              ? `≈ ${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU${rank ? ` · ${rank}` : ''}`
-              : rank
-                ? `${rank} of recent · p50 ${a.priorityFees!.p50.toLocaleString()}`
-                : undefined
+              ? `${(a.v1Config.priorityFeeLamports ?? 0n).toLocaleString()} lamports flat`
+              : `${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU${rank ? ` · ${rank}` : ''}`
           }
         />
-        <Stat
-          label="Jito tip"
-          value={fees.jitoTip ? <span className="text-neg">−{lamportsToSol(fees.jitoTip)} SOL</span> : 'None'}
-        />
+        <Stat label="Jito tip" value={fees.jitoTip ? lamportsToSol(fees.jitoTip) : 'None'} />
         <Stat
           label="Rent"
-          value={rentNet ? `${formatAmount(rentNet, 9, { signed: true, maxFraction: 6 })} SOL` : 'None'}
+          value={rentNet ? formatAmount(rentNet, 9, { signed: true, maxFraction: 6 }) : 'None'}
           tone={rentNet > 0n ? 'pos' : rentNet < 0n ? 'neg' : undefined}
           sub={rentPaid || rentBack ? `${rent.created.length} opened · ${rent.closed.length} closed` : undefined}
         />
       </div>
-    </div>
-  );
-};
-
-export const ResourcesCard: FC<{ a: Analysis }> = ({ a }) => {
-  const { compute } = a;
-  const mib = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MiB`;
-  return (
-    <Card
-      title="Compute & size"
-      right={
-        <span className="text-[13px] text-ink-2">
-          {a.instructions.length} ix · {a.accountKeys.length} accounts
-        </span>
-      }
-    >
-      <div className="space-y-2.5">
+      <div className="mt-4 grid grid-cols-3 gap-x-5">
         <Meter
           label={compute.explicitLimit ? 'Compute' : 'Compute · default limit'}
           value={compute.consumed ?? 0}
           max={compute.limit}
-          text={`${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()} CU`}
+          text={`${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()}`}
         />
         <Meter
           label={`Size · ${a.version === 'legacy' ? 'legacy' : `v${String(a.version)}`}`}
@@ -555,18 +651,22 @@ export const ResourcesCard: FC<{ a: Analysis }> = ({ a }) => {
         />
         {a.loadedAccountsDataSize !== undefined ? (
           <Meter
-            label="Loaded account data"
+            label="Loaded data"
             value={a.loadedAccountsDataSize}
             max={a.loadedAccountsDataLimit}
             text={`${mib(a.loadedAccountsDataSize)} / ${mib(a.loadedAccountsDataLimit)}`}
           />
         ) : null}
       </div>
-    </Card>
+      {a.priorityFees ? (
+        <p className="mt-3 text-xs text-ink-3">
+          Recent priority fees on these accounts: p50 {a.priorityFees.p50.toLocaleString()} · p75{' '}
+          {a.priorityFees.p75.toLocaleString()} · p90 {a.priorityFees.p90.toLocaleString()} µL/CU
+        </p>
+      ) : null}
+    </Section>
   );
 };
-
-// ---- Checks, other accounts, errors ---------------------------------------------------------------------
 
 const CheckRow: FC<{ check: Check }> = ({ check }) => (
   <div className="flex gap-2.5 py-1.5">
@@ -578,80 +678,61 @@ const CheckRow: FC<{ check: Check }> = ({ check }) => (
   </div>
 );
 
-export const ChecksCard: FC<{ a: Analysis; renderAddress: (address: string) => ReactNode }> = ({
-  a,
-  renderAddress,
-}) => {
-  const [showPassed, setShowPassed] = useState(false);
-  const [showOthers, setShowOthers] = useState(false);
-  const passed = a.checks.filter((c) => c.level === 'ok');
-  const flagged = a.checks.filter((c) => c.level !== 'ok' && c.title !== 'Simulation failed');
+export const ChecksSection: FC<{ a: Analysis }> = ({ a }) => {
+  const passed = a.checks.filter((c) => c.level === 'ok').length;
+  const warnings = a.checks.filter((c) => c.level === 'warn' || c.level === 'error').length;
+  const notes = a.checks.filter((c) => c.level === 'info').length;
+  // Problems first, then notes, then what passed.
+  const order = { error: 0, warn: 1, info: 2, ok: 3 } as const;
+  const sorted = [...a.checks].sort((x, y) => order[x.level] - order[y.level]);
   return (
-    <Card
+    <Section
       title="Checks"
-      right={
-        <span className="text-[13px] text-ink-2">
-          {passed.length} passed{flagged.length ? ` · ${flagged.length} to look at` : ''}
+      summary={
+        <span className="inline-flex items-center gap-1.5">
+          {passed} passed
+          {warnings ? (
+            <Pill tone={a.checks.some((c) => c.level === 'error') ? 'neg' : 'warn'}>{warnings} to look at</Pill>
+          ) : null}
+          {notes ? (
+            <Pill tone="info">
+              {notes} note{notes > 1 ? 's' : ''}
+            </Pill>
+          ) : null}
         </span>
       }
     >
-      {flagged.map((c, i) => (
-        <CheckRow key={i} check={c} />
-      ))}
-      <div className="mt-1 flex flex-wrap gap-x-4">
-        <Toggle open={showPassed} onClick={() => setShowPassed(!showPassed)}>
-          {passed.length} passed
-        </Toggle>
-        {a.others.length ? (
-          <Toggle open={showOthers} onClick={() => setShowOthers(!showOthers)}>
-            {a.others.length} account{a.others.length > 1 ? 's' : ''} touched
-          </Toggle>
-        ) : null}
+      <div className="grid grid-cols-2 gap-x-6">
+        {sorted.map((c, i) => (
+          <CheckRow key={i} check={c} />
+        ))}
       </div>
-      <Collapse open={showPassed}>
-        <div className="mt-1 grid grid-cols-2 gap-x-6">
-          {passed.map((c, i) => (
-            <CheckRow key={i} check={c} />
-          ))}
-        </div>
-      </Collapse>
-      {a.others.length ? (
-        <Collapse open={showOthers}>
-          <div className="mt-2 grid grid-cols-2 gap-x-6">
-            {a.others.map((o) => (
-              <div key={o.owner} className="border-b border-line py-2">
-                <div className="text-[13px] font-semibold">{renderAddress(o.owner)}</div>
-                {o.assets.map((asset) => (
-                  <div key={asset.mint} className="flex justify-between text-[13px]">
-                    <span className="text-ink-2">{symbolOf(asset.mint, a.tokens)}</span>
-                    <span className={toneOf(asset.delta)}>
-                      {formatAmount(asset.delta, asset.decimals, { signed: true })}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </Collapse>
-      ) : null}
-    </Card>
+    </Section>
   );
 };
 
-export const ErrorBanner: FC<{ a: Analysis }> = ({ a }) => {
-  if (!a.error) return null;
-  const swap = a.jupiter[0];
+export const OthersSection: FC<{ a: Analysis; renderAddress: (address: string) => ReactNode }> = ({
+  a,
+  renderAddress,
+}) => {
+  if (!a.others.length) return null;
   return (
-    <div className="rounded-card bg-neg-soft px-5 py-3.5">
-      <div className="text-[15px] font-semibold text-neg">{a.error.name ?? 'Simulation failed'}</div>
-      <div className="mt-0.5 break-words text-[13px] text-ink-2">{a.error.text}</div>
-      {swap?.unbounded ? (
-        <div className="mt-1.5 text-[13px]">
-          Without the limit the route fills {formatBps(swap.unbounded.vsQuoteBps)} vs quote, which is{' '}
-          <b className="text-neg">{formatBps(Math.abs(swap.unbounded.vsLimitBps)).replace(/^[+−]/, '')}</b> past your{' '}
-          {swap.exactOut ? 'maximum input' : 'minimum output'}.
-        </div>
-      ) : null}
-    </div>
+    <Section title="Other accounts" summary={`${a.others.length} touched · pools, vaults, other owners`}>
+      <div className="grid grid-cols-2 gap-x-6">
+        {a.others.map((o) => (
+          <div key={o.owner} className="border-b border-line py-2">
+            <div className="text-[13px] font-semibold">{renderAddress(o.owner)}</div>
+            {o.assets.map((asset) => (
+              <div key={asset.mint} className="flex justify-between text-[13px]">
+                <span className="text-ink-2">{symbolOf(asset.mint, a.tokens)}</span>
+                <span className={toneOf(asset.delta)}>
+                  {formatAmount(asset.delta, asset.decimals, { signed: true })}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </Section>
   );
 };

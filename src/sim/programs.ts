@@ -36,6 +36,7 @@ export const KNOWN_PROGRAMS: Record<string, string> = {
   SysvarC1ock11111111111111111111111111111111: 'Sysvar: Clock',
   SysvarRent111111111111111111111111111111111: 'Sysvar: Rent',
   PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu: 'Jupiter Perps',
+  '61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH': 'JupiterZ (RFQ)',
   KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD: 'Kamino Lend',
   whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc: 'Orca Whirlpool',
   LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo: 'Meteora DLMM',

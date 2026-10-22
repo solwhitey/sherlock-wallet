@@ -6,7 +6,19 @@ export type IxLogGroup = {
   returnData?: { programId: string; data: string };
 };
 
-export type LogFailure = { programId: string; message: string; customCode?: number };
+// Anchor programs log their errors in full before failing, including framework errors that are
+// not in the program's IDL and the two sides of a failed require_* comparison.
+export type AnchorErrorLog = {
+  code: string;
+  number: number;
+  message: string;
+  location?: string; // "programs/x/src/fill.rs:25"
+  account?: string; // "caused by account: …"
+  left?: string;
+  right?: string;
+};
+
+export type LogFailure = { programId: string; message: string; customCode?: number; anchor?: AnchorErrorLog };
 
 export type ParsedLogs = { groups: IxLogGroup[]; failure?: LogFailure; truncated: boolean };
 
@@ -15,6 +27,9 @@ const CONSUMED = /^Program (\w+) consumed (\d+) of (\d+) compute units$/;
 const FAILED = /^Program (\w+) failed: (.*)$/;
 const SUCCESS = /^Program (\w+) success$/;
 const RETURN = /^Program return: (\w+) (\S*)$/;
+const ANCHOR_ERROR =
+  /^Program log: AnchorError (?:thrown in (\S+?)|caused by account: (\S+?)|occurred)\. Error Code: (\w+)\. Error Number: (\d+)\. Error Message: (.*?)\.?$/;
+const LEFT_RIGHT = /^Program log: (Left|Right): ?(.*)$/;
 
 // Splits simulation logs into one group per top-level instruction (an `invoke [1]` line opens a
 // group), with the compute units and return data of that top-level call.
@@ -22,7 +37,23 @@ export function parseLogs(logs: string[] = []): ParsedLogs {
   const groups: IxLogGroup[] = [];
   let depth = 0;
   let failure: LogFailure | undefined;
+  let anchor: AnchorErrorLog | undefined;
   for (const line of logs) {
+    const anchorMatch = ANCHOR_ERROR.exec(line);
+    if (anchorMatch && !anchor) {
+      anchor = {
+        location: anchorMatch[1],
+        account: anchorMatch[2],
+        code: anchorMatch[3],
+        number: Number(anchorMatch[4]),
+        message: anchorMatch[5],
+      };
+    }
+    const lr = LEFT_RIGHT.exec(line);
+    if (lr && anchor && !failure) {
+      if (lr[1] === 'Left') anchor.left = lr[2];
+      else anchor.right = lr[2];
+    }
     const invoke = INVOKE.exec(line);
     if (invoke) {
       depth = Number(invoke[2]);
@@ -51,6 +82,7 @@ export function parseLogs(logs: string[] = []): ParsedLogs {
           programId: failed[1],
           message: failed[2],
           customCode: custom ? parseInt(custom[1], 16) : undefined,
+          anchor,
         };
       }
       if (depth === 1 && group) group.failed = failed[2];

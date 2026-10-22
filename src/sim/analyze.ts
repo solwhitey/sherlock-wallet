@@ -28,7 +28,7 @@ import {
 } from './programs';
 import { getMultipleAccounts, rpcCall } from './rpc';
 import { isWritable, ParsedTransaction, parseTransaction, patchInstructionData, V1_VERSION_BYTE, V1Config } from './tx';
-import { describeError } from './errors';
+import { describeError, ErrorDescription } from './errors';
 
 export const SOL = 'SOL';
 
@@ -63,6 +63,19 @@ export type GenericSwap = {
   vsMarketBps?: number;
 };
 
+// An RFQ fill (JupiterZ order engine and alike): the market maker's signed quote, with its expiry.
+export type RfqFill = {
+  path: string;
+  maker?: string;
+  inputMint?: string;
+  outputMint?: string;
+  inputAmount?: bigint;
+  outputAmount?: bigint;
+  expireAt?: number;
+  // Seconds left at simulation time (negative once expired).
+  secondsLeft?: number;
+};
+
 export type PriorityFeeStats = { p25: number; p50: number; p75: number; p90: number; max: number; samples: number };
 
 export type Analysis = {
@@ -77,7 +90,7 @@ export type Analysis = {
   recentBlockhash?: string;
   blockhashValid?: boolean;
   err: unknown;
-  error?: { text: string; programId?: string; name?: string; msg?: string; customCode?: number };
+  error?: ErrorDescription;
   compute: { consumed?: number; limit: number; explicitLimit: boolean; microLamportsPerCu: bigint };
   fees: { total?: bigint; base: bigint; priority: bigint; jitoTip: bigint };
   rent: { created: { address: string; lamports: bigint }[]; closed: { address: string; lamports: bigint }[] };
@@ -91,6 +104,7 @@ export type Analysis = {
   others: OwnerChanges[];
   swap?: GenericSwap;
   jupiter: JupiterSwap[];
+  rfq?: RfqFill;
   priorityFees?: PriorityFeeStats;
   // Programs called at the top level, other than the runtime's own (compute budget, system, token…).
   programs: string[];
@@ -461,6 +475,8 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     tokens
   );
 
+  const rfq = detectRfq(instructions);
+
   const [blockhashValid, priorityFees] = await Promise.all([blockhashPromise, priorityPromise]);
 
   const analysis: Analysis = {
@@ -495,6 +511,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     others,
     swap,
     jupiter,
+    rfq,
     priorityFees,
     programs: [...new Set(instructions.map((ix) => ix.programId).filter((id) => !BUILTIN_PROGRAMS.has(id)))],
     tokens,
@@ -545,6 +562,24 @@ async function measureShortfall(rpcUrl: string, transaction: Uint8Array, instruc
   } catch {
     // Best effort: the failure is already reported.
   }
+}
+
+function detectRfq(instructions: Instr[]): RfqFill | undefined {
+  const ix = instructions.find((i) => i.decoded?.name === 'fill' && i.decoded.args?.expire_at !== undefined);
+  if (!ix) return undefined;
+  const args = ix.decoded!.args!;
+  const account = (name: string) => ix.accounts.find((a) => a.name === name)?.address;
+  const expireAt = Number(args.expire_at);
+  return {
+    path: ix.path,
+    maker: account('maker'),
+    inputMint: account('input_mint'),
+    outputMint: account('output_mint'),
+    inputAmount: args.input_amount !== undefined ? BigInt(args.input_amount as bigint) : undefined,
+    outputAmount: args.output_amount !== undefined ? BigInt(args.output_amount as bigint) : undefined,
+    expireAt,
+    secondsLeft: Number.isFinite(expireAt) ? expireAt - Math.floor(Date.now() / 1000) : undefined,
+  };
 }
 
 function detectSwap(

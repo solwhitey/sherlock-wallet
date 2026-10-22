@@ -15,6 +15,13 @@ const ANCHOR_ERRORS: Record<number, string> = {
   2006: 'ConstraintSeeds',
   2012: 'ConstraintAddress',
   2014: 'ConstraintTokenMint',
+  2500: 'RequireViolated',
+  2501: 'RequireEqViolated',
+  2502: 'RequireKeysEqViolated',
+  2503: 'RequireNeqViolated',
+  2504: 'RequireKeysNeqViolated',
+  2505: 'RequireGtViolated',
+  2506: 'RequireGteViolated',
   2015: 'ConstraintTokenOwner',
   3001: 'AccountDiscriminatorNotFound',
   3002: 'AccountDiscriminatorMismatch',
@@ -51,13 +58,25 @@ const TX_ERRORS: Record<string, string> = {
   MaxLoadedAccountsDataSizeExceeded: 'Loaded account data exceeds the limit',
 };
 
+export type ErrorDescription = {
+  text: string;
+  programId?: string;
+  name?: string;
+  msg?: string;
+  customCode?: number;
+  location?: string;
+  account?: string;
+  left?: string;
+  right?: string;
+};
+
 export function describeError(
   err: unknown,
   failure: LogFailure | undefined,
   idls: Map<string, NormalizedIdl | null>,
   instructions: Instr[],
   labels: Record<string, string>
-): { text: string; programId?: string; name?: string; msg?: string; customCode?: number } {
+): ErrorDescription {
   let ixIndex: number | undefined;
   let custom: number | undefined;
   let kind: string | undefined;
@@ -83,6 +102,12 @@ export function describeError(
     if (!name && (programId === TOKEN_PROGRAM || programId === TOKEN_2022_PROGRAM)) name = TOKEN_ERRORS[custom];
     if (!name) name = ANCHOR_ERRORS[custom];
   }
+  // The program's own log is the most precise source when it is an Anchor error.
+  const anchor = failure?.anchor;
+  if (anchor && (custom === undefined || anchor.number === custom)) {
+    name ??= anchor.code;
+    msg ??= anchor.message;
+  }
 
   const where = ixIndex !== undefined ? `instruction #${ixIndex + 1}` : 'transaction';
   const program = programId ? (labels[programId] ?? programId) : undefined;
@@ -92,5 +117,15 @@ export function describeError(
       ? `custom error ${custom} (0x${custom.toString(16)})`
       : (kind ?? failure?.message ?? 'unknown error'));
   const text = `${what}${msg ? `: ${msg}` : ''} — ${program ? `${program}, ` : ''}${where}`;
-  return { text, programId, name, msg, customCode: custom };
+  return {
+    text,
+    programId,
+    name,
+    msg,
+    customCode: custom,
+    location: anchor?.location,
+    account: anchor?.account,
+    left: anchor?.left,
+    right: anchor?.right,
+  };
 }
