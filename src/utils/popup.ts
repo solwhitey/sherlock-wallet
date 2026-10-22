@@ -1,3 +1,5 @@
+import type { RPC } from '../messages';
+
 const SIZES: Record<string, { width: number; height: number }> = {
   default: { width: 420, height: 640 },
   inspect: { width: 720, height: 900 },
@@ -26,7 +28,10 @@ async function createPopup(page?: string, params: Record<string, string> = {}): 
   const { left, top } = await getPopupPosition(width);
   // The popup page's built path comes from the manifest: referencing popup.html from here would
   // make the bundler build a second copy of the whole UI in the service worker's environment.
-  const popupURL = new URL(chrome.runtime.getURL(chrome.runtime.getManifest().action?.default_popup ?? 'ui/popup.html'));
+  const manifest = chrome.runtime.getManifest() as chrome.runtime.ManifestV3 & {
+    side_panel?: { default_path?: string };
+  };
+  const popupURL = new URL(chrome.runtime.getURL(manifest.side_panel?.default_path ?? 'ui/popup.html'));
   if (page) {
     popupURL.searchParams.append('page', page);
   }
@@ -43,7 +48,13 @@ async function createPopup(page?: string, params: Record<string, string> = {}): 
   return popup;
 }
 
-export type PopupHandle = { closePopup: () => Promise<void>; popupClosed: Promise<null>; tabId?: number };
+// `rpc` is set when the page is a view in the side panel (the panel's own connection).
+export type PopupHandle = {
+  closePopup: () => Promise<void>;
+  popupClosed: Promise<null>;
+  tabId?: number;
+  rpc?: RPC;
+};
 
 // Follows a request window by its tab rather than its window: some environments (headless Chrome,
 // window managers that merge popups) put it in a window shared with other tabs.

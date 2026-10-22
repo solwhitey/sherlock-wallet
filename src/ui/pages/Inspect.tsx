@@ -24,9 +24,10 @@ import {
   RoutersSection,
   SeriesPoint,
 } from '../inspect/Summary';
-import { CheckIcon, CopyIcon, RefreshIcon, XIcon } from '../kit/icons';
+import { CheckIcon, ChevronLeft, CopyIcon, RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
 import { rpc } from '../rpc';
+import { closeView, isPanel } from '../view';
 import { BundleView } from '../inspect/Bundle';
 import { ForkChange, ForkPanel, ForkStats, fundingSuggestion, looksUnfunded } from '../inspect/Fork';
 
@@ -591,8 +592,8 @@ export const Inspect: FC = () => {
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-3 py-2">
-        <IconButton label={request?.method === 'paste' ? 'Close' : 'Reject and close'} onClick={() => window.close()}>
-          <XIcon size={18} />
+        <IconButton label={request?.method === 'paste' ? 'Close' : 'Reject and close'} onClick={closeView}>
+          {isPanel() ? <ChevronLeft size={18} /> : <XIcon size={18} />}
         </IconButton>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[14px] font-semibold leading-tight">
@@ -677,7 +678,7 @@ export const Inspect: FC = () => {
             {copied ? 'Copied' : 'Copy report for support'}
           </Button>
         ) : null}
-        <Button kind="dark" size="md" className="flex-1" onClick={() => window.close()}>
+        <Button kind="dark" size="md" className="flex-1" onClick={closeView}>
           {request?.method === 'paste' || request?.method === 'replay' ? 'Done' : 'Reject and close'}
         </Button>
       </footer>

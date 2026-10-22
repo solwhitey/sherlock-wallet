@@ -24,13 +24,12 @@ import {
 import { useConnection } from '../context/ConnectionContext';
 import { useAccounts } from '../hooks/useAccounts';
 import { explorerAddress, formatUsd, shortAddress, symbolOf, timeAgo, toneOf } from '../inspect/format';
-import { ChevronRight, ExternalIcon, RefreshIcon, XIcon } from '../kit/icons';
+import { ChevronLeft, ChevronRight, ExternalIcon, RefreshIcon, XIcon } from '../kit/icons';
 import {
   AddressAvatar,
   Button,
   CopyButton,
   FigCell,
-  FigStrip,
   IconButton,
   Pill,
   Row,
@@ -39,6 +38,7 @@ import {
   Tone,
 } from '../kit/kit';
 import { rpc } from '../rpc';
+import { closeView, isPanel } from '../view';
 
 // Everything an address holds and did on Jupiter, one window: open positions and orders first,
 // then activity. Each source loads on its own, so a failing API only empties its own block.
@@ -110,6 +110,19 @@ const Block: FC<{ title: string; load: Load<unknown[]>; onRetry: () => void; chi
 };
 
 // A row of figures with a heading cell; `onClick` replays its transaction in the inspector.
+// Below this width (the side panel) a row puts its heading on one line and its figures under it.
+const NARROW = 600;
+
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => window.innerWidth < NARROW);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < NARROW);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return narrow;
+}
+
 // `grow` widens cells by index (flex-grow), for a column whose text should not be cut.
 const Line: FC<{
   head: ReactNode;
@@ -117,20 +130,49 @@ const Line: FC<{
   cells: ReactNode[];
   grow?: number[];
   onClick?: () => void;
-}> = ({ head, sub, cells, grow, onClick }) => (
-  <Row onClick={onClick} className="-mx-3 !py-2">
-    <div className="min-w-0 flex-[1.6]">
+}> = ({ head, sub, cells, grow, onClick }) => {
+  const narrow = useNarrow();
+  const chevron = onClick ? (
+    <ChevronRight size={14} className="shrink-0 text-ink-3" />
+  ) : (
+    <span className="w-3.5 shrink-0" />
+  );
+  const heading = (
+    <div className={clsx('min-w-0', narrow ? 'flex-1' : 'flex-[1.6]')}>
       <div className="truncate text-[13px] font-semibold">{head}</div>
       {sub ? <div className="truncate text-xs text-ink-2">{sub}</div> : null}
     </div>
-    {cells.map((c, i) => (
-      <div key={i} className="min-w-0 flex-1 truncate text-right text-[13px]" style={{ flexGrow: grow?.[i] ?? 1 }}>
-        {c}
-      </div>
-    ))}
-    {onClick ? <ChevronRight size={14} className="shrink-0 text-ink-3" /> : <span className="w-3.5 shrink-0" />}
-  </Row>
-);
+  );
+  if (narrow) {
+    return (
+      <Row onClick={onClick} className="-mx-3 flex-col !items-stretch !gap-1 !py-2">
+        <div className="flex items-center gap-2">
+          {heading}
+          {chevron}
+        </div>
+        {/* Figures keep their natural width and wrap rather than being cut. */}
+        <div className="flex flex-wrap items-start gap-x-5 gap-y-1 text-[13px]">
+          {cells.map((c, i) => (
+            <div key={i} className="whitespace-nowrap">
+              {c}
+            </div>
+          ))}
+        </div>
+      </Row>
+    );
+  }
+  return (
+    <Row onClick={onClick} className="-mx-3 !py-2">
+      {heading}
+      {cells.map((c, i) => (
+        <div key={i} className="min-w-0 flex-1 truncate text-right text-[13px]" style={{ flexGrow: grow?.[i] ?? 1 }}>
+          {c}
+        </div>
+      ))}
+      {chevron}
+    </Row>
+  );
+};
 
 const Signed: FC<{ v?: number; pct?: number }> = ({ v, pct }) => (
   <span className={toneOf(v)}>
@@ -521,8 +563,8 @@ export const Wallet: FC = () => {
   return (
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-3 py-2">
-        <IconButton label="Close" onClick={() => window.close()}>
-          <XIcon size={18} />
+        <IconButton label={isPanel() ? 'Back' : 'Close'} onClick={closeView}>
+          {isPanel() ? <ChevronLeft size={18} /> : <XIcon size={18} />}
         </IconButton>
         <AddressAvatar address={address} size={32} />
         <div className="min-w-0 flex-1">
@@ -541,7 +583,8 @@ export const Wallet: FC = () => {
       </header>
 
       <main className="flex-1 space-y-4 px-5 pb-6 pt-4">
-        <FigStrip>
+        {/* Five figures in a row in a window, two per row in the narrow side panel. */}
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line bg-line min-[600px]:grid-cols-5 [&>*:last-child]:col-span-2 min-[600px]:[&>*:last-child]:col-span-1 [&>*]:bg-canvas">
           <FigCell label="SOL" value={sol.data === undefined ? '—' : amount(sol.data)} sub={sol.error} />
           <FigCell
             label="Perps PnL"
@@ -560,7 +603,7 @@ export const Wallet: FC = () => {
             value={String((triggers.data?.length ?? 0) + (recurring.data?.length ?? 0))}
             sub="limit + DCA"
           />
-        </FigStrip>
+        </div>
 
         <Card title="Open on Jupiter" right={loading ? <span className="text-xs text-ink-3">Loading…</span> : null}>
           {nothingOpen ? <p className="py-2 text-sm text-ink-2">No open positions or orders.</p> : null}
