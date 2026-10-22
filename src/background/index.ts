@@ -2,6 +2,7 @@ import type { RPC } from '../messages';
 import { CONTENT_PORT_NAME, createPortTransport, createRPC, POPUP_PORT_NAME } from '../messages';
 import { toBase64 } from '../messages/bytes';
 import { asyncState } from '../utils/asyncState';
+import { DisplayMode, getDisplayMode, onDisplayModeChange, uiPagePath } from '../utils/displayMode';
 import { openPopup, PopupHandle, trackPopup } from '../utils/popup';
 import { clearHistory, getHistory, getRequest, saveRequest } from './requests';
 import { addAccount, getAccounts, removeAccount } from './storage';
@@ -49,7 +50,17 @@ async function keepAlive<T>(work: () => Promise<T>): Promise<T> {
 // (src/ui/view.ts) rather than in windows. A panel registers itself for its browser window; a
 // view counts as closed when the panel closes it (Reject, Done, back) or the panel goes away.
 
-chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+// The toolbar icon follows the display mode setting: no popup and the panel opening on click, or
+// the popup. Read once at start, then on every change.
+let displayMode: DisplayMode = 'panel';
+
+async function applyDisplayMode(mode: DisplayMode) {
+  displayMode = mode;
+  await chrome.action.setPopup({ popup: mode === 'popup' ? uiPagePath() : '' });
+  await chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: mode === 'panel' }).catch(() => undefined);
+}
+getDisplayMode().then(applyDisplayMode);
+onDisplayModeChange(applyDisplayMode);
 
 const panels = new Map<number, { rpc: RPC; viewIds: string[] }>();
 const panelWaiters = new Map<number, (() => void)[]>();
@@ -86,7 +97,7 @@ async function panelFor(windowId: number, waitMs: number): Promise<RPC | undefin
 // Chrome lets sidePanel.open() run only in response to a user action, so it is tried first thing
 // in a request's handler, before anything is awaited; a refusal falls back to a window.
 const tryOpenPanel = (windowId: number | undefined): Promise<boolean> =>
-  windowId === undefined || panels.has(windowId) || !chrome.sidePanel?.open
+  displayMode !== 'panel' || windowId === undefined || panels.has(windowId) || !chrome.sidePanel?.open
     ? Promise.resolve(false)
     : chrome.sidePanel.open({ windowId }).then(
         () => true,
@@ -158,7 +169,7 @@ async function requestWindow(
     }
   }
   const remember = (value: StoredView) => (key ? chrome.storage.session.set({ [windowKey(key)]: value }) : undefined);
-  if (target.windowId !== undefined) {
+  if (target.windowId !== undefined && displayMode === 'panel') {
     const waitMs = (await target.panelOpening) ? 5000 : 0;
     const view = await showView(target.windowId, page, await params(), waitMs);
     if (view) {

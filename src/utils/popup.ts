@@ -1,4 +1,5 @@
 import type { RPC } from '../messages';
+import { uiPagePath } from './displayMode';
 
 const SIZES: Record<string, { width: number; height: number }> = {
   default: { width: 420, height: 640 },
@@ -28,10 +29,7 @@ async function createPopup(page?: string, params: Record<string, string> = {}): 
   const { left, top } = await getPopupPosition(width);
   // The popup page's built path comes from the manifest: referencing popup.html from here would
   // make the bundler build a second copy of the whole UI in the service worker's environment.
-  const manifest = chrome.runtime.getManifest() as chrome.runtime.ManifestV3 & {
-    side_panel?: { default_path?: string };
-  };
-  const popupURL = new URL(chrome.runtime.getURL(manifest.side_panel?.default_path ?? 'ui/popup.html'));
+  const popupURL = new URL(chrome.runtime.getURL(uiPagePath()));
   if (page) {
     popupURL.searchParams.append('page', page);
   }

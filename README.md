@@ -27,7 +27,7 @@ In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by t
 # Features
 
 - Legacy, v0 and v1 (SIMD-0385) transactions, decoded with @solana/kit; v1 header limits and flat priority fees are read and checked
-- Lives in Chrome's side panel, next to the dapp: the toolbar icon (or Alt+Shift+X) opens it, and connection and signing requests show inside it, with Back returning to where you were. When Chrome does not allow opening the panel (no click behind the request), a request window opens instead
+- Opens in Chrome's side panel or as a popup, your choice (the header button switches in one click; also in Settings). In the side panel, connection and signing requests show inside it, next to the dapp, with Back returning to where you were; when Chrome does not allow opening the panel (no click behind the request), or in popup mode, a request window opens instead
 - Wallet view for any address: open Jupiter positions (Perps, Predict, Lend, limit orders, DCA) and activity (transactions, Predict fills and failures, Perps trades); every row replays its transaction in the inspector
 - Use any Solana address on any wallet-standard dApp: `signTransaction`, `signAndSendTransaction`, `signAndSendAllTransactions` and `signMessage` all open the inspector (and are always rejected — Sherlock holds no keys)
 - Simulation in the popup, re-run every 5 seconds against the current chain state (stale blockhashes are replaced):

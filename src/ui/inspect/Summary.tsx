@@ -303,7 +303,7 @@ export const ExecutionCard: FC<{ a: Analysis; quote?: QuoteState; onRequote: () 
           </Button>
         }
       >
-        <div className="grid grid-cols-4 gap-x-5">
+        <div className="grid grid-cols-2 gap-x-5 gap-y-3 min-[520px]:grid-cols-4">
           {j.failed ? (
             <Stat
               label="Short of limit"
@@ -383,7 +383,7 @@ export const ExecutionCard: FC<{ a: Analysis; quote?: QuoteState; onRequote: () 
           </>
         }
       >
-        <div className="grid grid-cols-4 gap-x-5">
+        <div className="grid grid-cols-2 gap-x-5 gap-y-3 min-[520px]:grid-cols-4">
           <Stat label="You pay" value={amount(rfq.inputAmount, inDec, rfq.inputMint)} />
           <Stat label="You receive" value={amount(rfq.outputAmount, outDec, rfq.outputMint)} />
           <Stat
@@ -413,7 +413,7 @@ export const ExecutionCard: FC<{ a: Analysis; quote?: QuoteState; onRequote: () 
   const p = prices(a);
   return (
     <Card title={a.swap ? 'Execution' : 'Programs'}>
-      <div className="grid grid-cols-4 gap-x-5">
+      <div className="grid grid-cols-2 gap-x-5 gap-y-3 min-[520px]:grid-cols-4">
         {a.swap ? (
           <>
             <Stat
@@ -513,7 +513,7 @@ export const RouteSection: FC<{ a: Analysis; swap: JupiterSwap; series: SeriesPo
       title="Jupiter route"
       summary={`${swap.instruction} · ${venues.length ? venues.slice(0, 3).join(', ') + (venues.length > 3 ? '…' : '') : `${swap.route.length} steps`}`}
     >
-      <div className="grid grid-cols-4 gap-x-5">
+      <div className="grid grid-cols-2 gap-x-5 gap-y-3 min-[520px]:grid-cols-4">
         <Stat label={`Quoted ${side}`} value={fmt(quoted, side)} />
         <Stat
           label={`Simulated ${side}`}
@@ -538,7 +538,7 @@ export const RouteSection: FC<{ a: Analysis; swap: JupiterSwap; series: SeriesPo
           }
         />
       </div>
-      <div className="mt-4 grid grid-cols-[1fr_220px] gap-6">
+      <div className="mt-4 grid grid-cols-1 gap-4 min-[560px]:grid-cols-[1fr_220px] min-[560px]:gap-6">
         <div className="space-y-1.5">
           {swap.route.map((step, i) => (
             <div key={i} className="flex items-center gap-2.5 text-[13px]">
@@ -618,7 +618,7 @@ export const FeesSection: FC<{ a: Analysis; defaultOpen?: boolean; withBreakdown
       title="Fees & compute"
       summary={`${lamportsToSol(totalFee(a))} SOL · ${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()} CU · ${a.size} B`}
     >
-      <div className="grid grid-cols-4 gap-x-5">
+      <div className="grid grid-cols-2 gap-x-5 gap-y-3 min-[520px]:grid-cols-4">
         <Stat
           label="Base"
           value={lamportsToSol(fees.base)}
@@ -762,17 +762,22 @@ const ComputeRow: FC<{ node: InvokeNode; a: Analysis; total: number; depth: numb
   const smallCu = small.reduce((s, c) => s + (c.computeUnits ?? 0), 0);
   return (
     <>
-      <div className="flex items-center gap-3 py-1 text-[13px]" style={{ paddingLeft: depth * 16 }}>
+      {/* Narrow (side panel): the name takes the free width and the bar goes. */}
+      <div className="flex items-center gap-3 py-1 text-[13px]" style={{ paddingLeft: depth * 12 }}>
         <span
-          className={clsx('w-44 shrink-0 truncate', depth === 0 && 'font-semibold', node.failed && 'text-neg')}
+          className={clsx(
+            'min-w-0 flex-1 truncate min-[520px]:w-44 min-[520px]:flex-none min-[520px]:shrink-0',
+            depth === 0 && 'font-semibold',
+            node.failed && 'text-neg'
+          )}
           title={node.programId}
         >
           {a.labels[node.programId] ?? shortAddress(node.programId)}
         </span>
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint">
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint max-[519px]:hidden">
           <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(share * 100, cu ? 0.5 : 0)}%` }} />
         </div>
-        <span className="w-28 shrink-0 text-right text-ink-2">
+        <span className="w-16 shrink-0 text-right text-ink-2 min-[520px]:w-28">
           {node.computeUnits !== undefined ? cu.toLocaleString() : '—'}
         </span>
         <span className="w-10 shrink-0 text-right text-ink-3">

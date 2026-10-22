@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from 'react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ICON } from '../../content/Icon';
 import { AccountList, AddAccountForm } from '../components/Accounts';
 import { PasteTransaction, RequestHistory } from '../components/InspectTools';
@@ -7,12 +7,14 @@ import { RpcSetupCard } from '../components/RpcSetup';
 import { RPC_PRESETS, useConnection } from '../context/ConnectionContext';
 import { useAccounts } from '../hooks/useAccounts';
 import { shortAddress } from '../inspect/format';
-import { CheckIcon, ChevronLeft, SettingsIcon } from '../kit/icons';
+import { CheckIcon, ChevronLeft, PanelIcon, PopupIcon, SettingsIcon } from '../kit/icons';
 import { AddressAvatar, Button, CopyButton, IconButton, Row, Segmented } from '../kit/kit';
 import { rpc } from '../rpc';
 import { getTheme, setTheme, ThemeChoice } from '../theme';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { JUP_KEY_STORAGE } from '../../sim/jupApi';
+import { DisplayMode, getDisplayMode, setDisplayMode, uiPagePath } from '../../utils/displayMode';
+import { currentSurface } from '../view';
 
 type View = 'home' | 'add' | 'settings';
 
@@ -51,6 +53,70 @@ const ViewingAs: FC = () => {
       <Button kind="soft" size="sm" className="mt-4 w-full" onClick={() => rpc.callMethod('openWallet', [address])}>
         Positions and activity
       </Button>
+    </div>
+  );
+};
+
+// One click to the other way of opening Sherlock, as in other wallets. Opening the panel has to
+// happen inside the click (Chrome allows sidePanel.open only in response to a user action).
+const SwitchMode: FC = () => {
+  const surface = currentSurface();
+  const [windowId, setWindowId] = useState<number>();
+  useEffect(() => {
+    chrome.windows.getCurrent().then((w) => setWindowId(w.id));
+  }, []);
+  if (surface === 'page') return null;
+  const toPanel = surface === 'popup';
+  const label = toPanel ? 'Open in side panel' : 'Switch to popup';
+  return (
+    <IconButton
+      label={label}
+      title={label}
+      onClick={() => {
+        if (toPanel) {
+          if (windowId === undefined) return;
+          chrome.sidePanel.open({ windowId }).then(
+            () => setDisplayMode('panel').then(() => window.close()),
+            () => undefined
+          );
+          return;
+        }
+        chrome.action
+          .setPopup({ popup: uiPagePath() })
+          .then(() => setDisplayMode('popup'))
+          .then(() => chrome.action.openPopup().catch(() => undefined))
+          .finally(() => window.close());
+      }}
+    >
+      {toPanel ? <PanelIcon size={18} /> : <PopupIcon size={18} />}
+    </IconButton>
+  );
+};
+
+const DisplayModeSetting: FC = () => {
+  const [mode, setMode] = useState<DisplayMode>();
+  useEffect(() => {
+    getDisplayMode().then(setMode);
+  }, []);
+  if (!mode) return null;
+  return (
+    <div>
+      <h2 className="text-lg font-semibold">Open Sherlock in</h2>
+      <p className="mb-3 text-xs text-ink-2">
+        The side panel stays open next to the dapp and shows its requests. The popup opens under the toolbar icon, and
+        requests open their own window. Applies the next time you click the icon.
+      </p>
+      <Segmented<DisplayMode>
+        value={mode}
+        onChange={(m) => {
+          setMode(m);
+          setDisplayMode(m);
+        }}
+        items={[
+          { id: 'panel', label: 'Side panel' },
+          { id: 'popup', label: 'Popup' },
+        ]}
+      />
     </div>
   );
 };
@@ -101,6 +167,8 @@ const Settings: FC<{ onBack: () => void }> = ({ onBack }) => {
     <>
       <SubpageHeader title="Settings" onBack={onBack} />
       <div className="space-y-7 px-5 py-5">
+        <DisplayModeSetting />
+
         <div>
           <h2 className="text-lg font-semibold">Appearance</h2>
           <p className="mb-3 text-xs text-ink-2">Auto follows your system's light or dark mode.</p>
@@ -212,7 +280,9 @@ export const Home: FC = () => {
       <header className="sticky top-0 z-10 flex items-center gap-2.5 bg-canvas px-5 pb-2 pt-4">
         <img src={ICON} alt="" className="h-8 w-8 rounded-lg bg-ink object-contain p-1" />
         <span className="text-[17px] font-bold tracking-tight">Sherlock</span>
-        <IconButton label="Settings" className="ml-auto" onClick={() => setView('settings')}>
+        <span className="ml-auto" />
+        <SwitchMode />
+        <IconButton label="Settings" onClick={() => setView('settings')}>
           <SettingsIcon size={18} />
         </IconButton>
       </header>

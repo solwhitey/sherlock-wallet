@@ -137,7 +137,6 @@
       sans-serif;
     font-feature-settings: 'tnum' 1;
     -webkit-font-smoothing: antialiased;
-    min-width: 400px;
     overflow-x: hidden;
   }
 

@@ -8,7 +8,7 @@ import { Home } from './pages/Home';
 import { Inspect } from './pages/Inspect';
 import { Wallet } from './pages/Wallet';
 import { applyTheme, followThemeChanges } from './theme';
-import { startPanel, subscribe, View, viewStack } from './view';
+import { setSurface, startPanel, subscribe, Surface, View, viewStack } from './view';
 
 applyTheme();
 followThemeChanges();
@@ -52,18 +52,22 @@ const PanelRoot: FC = () => {
   );
 };
 
-// The side panel page has no tab of its own; `?panel` forces panel mode (handy in a tab for tests).
-async function inPanel() {
+// The side panel and the toolbar popup have no tab of their own; `?panel` forces panel mode (handy
+// in a tab for tests).
+async function detectSurface(): Promise<Surface> {
   const params = new URLSearchParams(window.location.search);
-  if (params.has('panel')) return true;
-  if (params.get('page')) return false;
-  return (await chrome.tabs.getCurrent()) === undefined;
+  if (params.has('panel')) return 'panel';
+  if (params.get('page')) return 'page';
+  if (chrome.extension.getViews({ type: 'popup' }).includes(window)) return 'popup';
+  return (await chrome.tabs.getCurrent()) === undefined ? 'panel' : 'page';
 }
 
-const rootNode = document.getElementById('root');
 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-const root = createRoot(rootNode!);
-inPanel().then(async (panel) => {
+const root = createRoot(document.getElementById('root')!);
+
+detectSurface().then(async (surface) => {
+  const panel = surface === 'panel';
+  setSurface(surface);
   if (panel) await startPanel();
   root.render(
     <StrictMode>

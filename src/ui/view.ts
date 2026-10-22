@@ -7,6 +7,14 @@ import { onConnect, rpc } from './rpc';
 
 export type View = { viewId: string; page: string; params: Record<string, string> };
 
+// Where this page runs: the side panel, the toolbar popup, or a window or tab of its own.
+export type Surface = 'panel' | 'popup' | 'page';
+let surface: Surface = 'page';
+export const currentSurface = () => surface;
+export const setSurface = (s: Surface) => {
+  surface = s;
+};
+
 let panel = false;
 let stack: View[] = [];
 const listeners = new Set<(stack: View[]) => void>();
@@ -45,6 +53,7 @@ export function closeView() {
 
 export async function startPanel() {
   panel = true;
+  surface = 'panel';
   const { id: windowId } = await chrome.windows.getCurrent();
   rpc.exposeMethod('showView', async ([view]) => {
     setStack([...stack.filter((v) => v.viewId !== (view as View).viewId), view as View]);

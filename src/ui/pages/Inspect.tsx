@@ -306,7 +306,7 @@ const TxInspector: FC<{
       ) : null}
       <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={(live && mode === 'now') || running} />
       <span
-        className="truncate"
+        className="truncate max-[420px]:hidden"
         title={
           analysis?.slot
             ? `slot ${analysis.slot.toLocaleString()}${analysis.source === 'wasm' ? ' · in-browser VM' : ''}`
@@ -322,7 +322,7 @@ const TxInspector: FC<{
               : ''}
       </span>
       {mode === 'now' ? <Switch checked={live} onChange={setLive} label="Live" /> : null}
-      <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
+      <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7 max-[359px]:hidden">
         <RefreshIcon size={13} className={running ? 'animate-spin' : ''} />
       </IconButton>
     </div>
@@ -436,8 +436,10 @@ const TxInspector: FC<{
   return (
     <div>
       {controls}
-      <div className="mb-3 flex items-center gap-3">
+      {/* The tabs scroll sideways when the side panel is too narrow for them. */}
+      <div className="-mx-5 mb-3 flex items-center gap-3 overflow-x-auto px-5 [scrollbar-width:none]">
         <Segmented<TabId>
+          className="shrink-0"
           value={tab}
           onChange={setTab}
           items={[
@@ -591,7 +593,7 @@ export const Inspect: FC = () => {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-3 py-2">
+      <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-line bg-canvas px-3 py-2">
         <IconButton label={request?.method === 'paste' ? 'Close' : 'Reject and close'} onClick={closeView}>
           {isPanel() ? <ChevronLeft size={18} /> : <XIcon size={18} />}
         </IconButton>
@@ -607,10 +609,11 @@ export const Inspect: FC = () => {
             <div className="truncate text-[11px] text-ink-2">{METHOD_LABEL[request.method]}</div>
           ) : null}
         </div>
-        <div id="inspector-controls" className="flex shrink-0 items-center" />
+        {/* Narrow (side panel): the controls take a second row, so the title keeps its room. */}
+        <div id="inspector-controls" className="flex shrink-0 items-center max-[560px]:order-last max-[560px]:w-full" />
         {request ? (
           <div
-            className="flex min-w-0 items-center gap-2 rounded-full border border-line py-1 pl-1 pr-3"
+            className="flex min-w-0 items-center gap-2 rounded-full border border-line py-1 pl-1 pr-3 max-[560px]:hidden"
             title={request.address}
           >
             <AddressAvatar address={request.address} size={24} />
@@ -675,7 +678,7 @@ export const Inspect: FC = () => {
             title="Copies a Markdown report with a command that reproduces the simulation"
           >
             {copied ? <CheckIcon size={14} className="text-pos" /> : <CopyIcon size={14} />}
-            {copied ? 'Copied' : 'Copy report for support'}
+            <span className="max-[440px]:hidden">{copied ? 'Copied' : 'Copy report for support'}</span>
           </Button>
         ) : null}
         <Button kind="dark" size="md" className="flex-1" onClick={closeView}>

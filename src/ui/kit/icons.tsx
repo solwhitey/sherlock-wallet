@@ -43,6 +43,19 @@ export const ExternalIcon = icon(
 export const RefreshIcon = icon(
   <path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" />
 );
+// The two ways Sherlock opens: Chrome's side panel, and a popup under the toolbar icon.
+export const PanelIcon = icon(
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M15 4v16" />
+  </>
+);
+export const PopupIcon = icon(
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <rect x="12" y="7" width="6" height="6" rx="1" />
+  </>
+);
 export const DownloadIcon = icon(<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />);
 export const AlertIcon = icon(
   <>
