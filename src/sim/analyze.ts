@@ -91,6 +91,8 @@ export type Analysis = {
   swap?: GenericSwap;
   jupiter: JupiterSwap[];
   priorityFees?: PriorityFeeStats;
+  // Programs called at the top level, other than the runtime's own (compute budget, system, token…).
+  programs: string[];
   tokens: Record<string, TokenInfo>;
   labels: Record<string, string>;
   checks: Check[];
@@ -492,6 +494,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     swap,
     jupiter,
     priorityFees,
+    programs: [...new Set(instructions.map((ix) => ix.programId).filter((id) => !BUILTIN_PROGRAMS.has(id)))],
     tokens,
     labels,
     checks: [],

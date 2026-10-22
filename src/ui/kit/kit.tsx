@@ -16,7 +16,7 @@ export const Button: FC<
       'press inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-xl font-semibold disabled:pointer-events-none disabled:opacity-40',
       { sm: 'h-8 px-3 text-xs', md: 'h-10 px-4 text-sm', lg: 'h-12 px-5 text-[15px]' }[size],
       {
-        dark: 'bg-ink text-canvas hover:opacity-90',
+        dark: 'bg-accent text-accent-ink hover:opacity-90',
         soft: 'bg-tint text-ink hover:bg-selected',
         outline: 'border border-line-strong bg-canvas text-ink hover:bg-hover',
         ghost: 'text-ink hover:bg-hover',
@@ -256,7 +256,7 @@ export const Switch: FC<{ checked: boolean; onChange: (v: boolean) => void; labe
     <span
       className={clsx(
         'relative inline-block h-5 w-9 shrink-0 rounded-full transition-colors duration-[var(--dur-2)]',
-        checked ? 'bg-ink' : 'bg-line-strong'
+        checked ? 'bg-accent' : 'bg-line-strong'
       )}
     >
       <span

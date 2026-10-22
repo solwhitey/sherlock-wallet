@@ -1,6 +1,6 @@
 const SIZES: Record<string, { width: number; height: number }> = {
   default: { width: 420, height: 640 },
-  inspect: { width: 560, height: 860 },
+  inspect: { width: 720, height: 900 },
 };
 
 async function getPopupPosition(width: number) {

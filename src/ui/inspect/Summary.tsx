@@ -1,18 +1,29 @@
 import clsx from 'clsx';
-import React, { FC, ReactNode } from 'react';
+import React, { FC, ReactNode, useState } from 'react';
 import { Analysis, AssetDelta, Check, SOL, usdValue } from '../../sim/analyze';
 import type { FreshQuote } from '../../sim/jupApi';
 import type { JupiterSwap } from '../../sim/jupiter';
 import { WSOL_MINT } from '../../sim/programs';
-import { AlertIcon, RefreshIcon } from '../kit/icons';
-import { Button, Dot, FigCell, FigStrip, Pill, Section, Stat, TokenIcon, Tone } from '../kit/kit';
-import { formatAmount, formatBps, formatPct, formatUsd, iconOf, lamportsToSol, symbolOf, toneOf } from './format';
+import { ChevronDown, RefreshIcon } from '../kit/icons';
+import { Button, Collapse, TokenIcon, Tone, toneText } from '../kit/kit';
+import {
+  formatAmount,
+  formatBps,
+  formatPct,
+  formatUsd,
+  iconOf,
+  lamportsToSol,
+  shortAddress,
+  symbolOf,
+  toneOf,
+} from './format';
 
 export type QuoteState = { loading: boolean; quote?: FreshQuote; error?: string };
 export type SeriesPoint = { t: number; amount?: bigint; failed: boolean };
 
+// Signed values: negative red, positive green, zero in the normal colour. Tiny bps moves count as zero.
 const bpsTone = (bps?: number): Tone | undefined =>
-  bps === undefined ? undefined : bps > 0.05 ? 'pos' : bps < -0.05 ? 'neg' : 'muted';
+  bps === undefined ? undefined : bps > 0.05 ? 'pos' : bps < -0.05 ? 'neg' : undefined;
 
 // What the fee payer spends on the network, so a SOL change made only of fees reads as a fee line
 // rather than as a balance change.
@@ -20,215 +31,310 @@ function networkCost(a: Analysis) {
   return a.user === a.feePayer ? (a.fees.total ?? a.fees.base + a.fees.priority) + a.fees.jitoTip : 0n;
 }
 
-// ---- Hero -------------------------------------------------------------------------------------
+const solUsd = (a: Analysis, lamports: bigint) => formatUsd(usdValue({ mint: SOL, decimals: 9 }, lamports, a.tokens));
 
-const AssetLine: FC<{ asset: AssetDelta; a: Analysis; note?: string }> = ({ asset, a, note }) => {
-  const usd = usdValue(asset, asset.delta, a.tokens);
-  const name = asset.mint === SOL ? 'Solana' : asset.mint === WSOL_MINT ? 'Wrapped SOL' : a.tokens[asset.mint]?.name;
-  return (
-    <div className="flex items-center gap-3 py-2.5">
-      <TokenIcon src={iconOf(asset.mint, a.tokens)} size={36} />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[15px] font-semibold">{symbolOf(asset.mint, a.tokens)}</div>
-        <div className="truncate text-xs text-ink-3">{note ?? name ?? ''}</div>
+// ---- Building blocks ------------------------------------------------------------------------------
+
+const Panel: FC<{ title?: ReactNode; right?: ReactNode; className?: string; children: ReactNode }> = ({
+  title,
+  right,
+  className,
+  children,
+}) => (
+  <section className={clsx('rounded-xl border border-line bg-raised px-3.5 py-3', className)}>
+    {title || right ? (
+      <div className="mb-2 flex h-7 items-center gap-2">
+        <h2 className="caps truncate">{title}</h2>
+        <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div>
       </div>
-      <div className="text-right">
-        <div className={clsx('text-[17px] font-semibold', asset.delta > 0n ? 'text-pos' : 'text-ink')}>
-          {formatAmount(asset.delta, asset.decimals, { signed: true, maxFraction: asset.decimals > 6 ? 6 : 4 })}
-        </div>
-        <div className="text-xs text-ink-3">{formatUsd(usd, { signed: true })}</div>
+    ) : null}
+    {children}
+  </section>
+);
+
+const KV: FC<{
+  label: ReactNode;
+  value: ReactNode;
+  sub?: ReactNode;
+  tone?: Tone;
+  className?: string;
+  title?: string;
+}> = ({ label, value, sub, tone, className, title }) => (
+  <div className={clsx('min-w-0', className)} title={title}>
+    <div className="truncate text-[11px] text-ink-3">{label}</div>
+    <div className={clsx('truncate text-[14px] font-semibold leading-snug', tone && toneText[tone])}>{value}</div>
+    {sub ? <div className="truncate text-[11px] text-ink-2">{sub}</div> : null}
+  </div>
+);
+
+const Bar: FC<{ label: ReactNode; value: number; max: number; text: ReactNode }> = ({ label, value, max, text }) => {
+  const ratio = max ? Math.min(1, value / max) : 0;
+  return (
+    <div>
+      <div className="flex justify-between gap-2 text-[11px]">
+        <span className="text-ink-3">{label}</span>
+        <span className="truncate text-ink-2">{text}</span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-tint">
+        <div
+          className={clsx('h-full rounded-full', ratio > 0.9 ? 'bg-warn' : 'bg-accent')}
+          style={{ width: `${ratio * 100}%` }}
+        />
       </div>
     </div>
   );
 };
 
-export const Hero: FC<{ a: Analysis }> = ({ a }) => {
+// ---- Trade --------------------------------------------------------------------------------------------
+
+function displayChanges(a: Analysis) {
   const cost = networkCost(a);
-  // SOL and wSOL moving in opposite directions is wrapping or unwrapping, not two trades: show the
-  // net SOL once.
+  // SOL and wSOL moving in opposite directions is wrapping or unwrapping, not two trades.
   let changes = a.userChanges;
   const sol = changes.find((c) => c.mint === SOL);
   const wsol = changes.find((c) => c.mint === WSOL_MINT);
   const notes: Record<string, string> = {};
   if (sol && wsol && sol.delta > 0n !== wsol.delta > 0n) {
-    const net = { ...sol, delta: sol.delta + wsol.delta };
     notes[SOL] =
-      `incl. ${formatAmount(wsol.delta < 0n ? -wsol.delta : wsol.delta, 9, { maxFraction: 4 })} SOL ${wsol.delta < 0n ? 'unwrapped' : 'wrapped'}`;
-    changes = [net, ...changes.filter((c) => c !== sol && c !== wsol)];
+      `incl. ${formatAmount(wsol.delta < 0n ? -wsol.delta : wsol.delta, 9, { maxFraction: 4 })} ${wsol.delta < 0n ? 'unwrapped' : 'wrapped'}`;
+    changes = [{ ...sol, delta: sol.delta + wsol.delta }, ...changes.filter((c) => c !== sol && c !== wsol)];
   }
-  // Hide the SOL line when it is nothing but fees and tips; the fee line below says it.
+  // A SOL change that is only fees and tips shows as the fee line instead.
   changes = changes.filter((c) => c.delta !== 0n && !(c.mint === SOL && cost > 0n && c.delta === -cost));
+  return { changes, notes, cost };
+}
+
+const AssetLine: FC<{ asset: AssetDelta; a: Analysis; note?: string }> = ({ asset, a, note }) => {
+  const usd = usdValue(asset, asset.delta, a.tokens);
+  const name = asset.mint === SOL ? 'Solana' : asset.mint === WSOL_MINT ? 'Wrapped SOL' : a.tokens[asset.mint]?.name;
+  return (
+    <div className="flex items-center gap-2.5 py-1.5">
+      <TokenIcon src={iconOf(asset.mint, a.tokens)} size={28} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[14px] font-semibold leading-tight">{symbolOf(asset.mint, a.tokens)}</div>
+        <div className="truncate text-[11px] text-ink-3">{note ?? name ?? ''}</div>
+      </div>
+      <div className="text-right">
+        <div className={clsx('text-[15px] font-semibold leading-tight', toneOf(asset.delta))}>
+          {formatAmount(asset.delta, asset.decimals, { signed: true, maxFraction: asset.decimals > 6 ? 6 : 4 })}
+        </div>
+        <div className={clsx('text-[11px]', toneOf(usd))}>{formatUsd(usd, { signed: true })}</div>
+      </div>
+    </div>
+  );
+};
+
+// "1 SOL = 103.62 USDC" for what was bought, and the same at Jupiter's market prices.
+function prices(a: Analysis) {
+  const swap = a.swap;
+  if (!swap) return undefined;
+  const bought = Number(swap.bought.delta) / 10 ** swap.bought.decimals;
+  const sold = Number(-swap.sold.delta) / 10 ** swap.sold.decimals;
+  if (!bought || !sold) return undefined;
+  const priceOf = (mint: string) => a.tokens[mint === SOL ? WSOL_MINT : mint]?.usdPrice;
+  const pb = priceOf(swap.bought.mint);
+  const ps = priceOf(swap.sold.mint);
+  const fmt = (v: number) => v.toLocaleString('en-US', { maximumSignificantDigits: 6 });
+  const quote = symbolOf(swap.sold.mint, a.tokens);
+  return {
+    unit: `1 ${symbolOf(swap.bought.mint, a.tokens)}`,
+    effective: `${fmt(sold / bought)} ${quote}`,
+    market: pb && ps ? `${fmt(pb / ps)} ${quote}` : undefined,
+  };
+}
+
+export const TradePanel: FC<{ a: Analysis }> = ({ a }) => {
+  const { changes, notes, cost } = displayChanges(a);
   const sends = changes.filter((c) => c.delta < 0n);
   const receives = changes.filter((c) => c.delta > 0n);
-  const swap = a.jupiter[0];
   const title = a.err
-    ? 'This transaction fails'
-    : swap || a.swap
+    ? 'Fails'
+    : a.jupiter.length || a.swap
       ? 'Swap'
       : changes.length
         ? 'Balance changes'
         : 'No balance changes';
-
+  const p = prices(a);
   return (
-    <div className="rise-in">
-      <h1 className="text-[26px] font-bold leading-tight tracking-tight">{title}</h1>
-      {a.error ? (
-        <div className="mt-3 rounded-card bg-neg-soft px-4 py-3">
-          <div className="text-[15px] font-semibold text-neg">{a.error.name ?? 'Simulation failed'}</div>
-          <div className="mt-0.5 break-words text-sm text-ink-2">{a.error.msg ?? a.error.text}</div>
-          {swap?.unbounded ? (
-            <div className="mt-2 text-sm text-ink">
-              The route would fill <b>{formatBps(Math.abs(swap.unbounded.vsLimitBps)).replace(/^[+−]/, '')}</b> short of
-              your {swap.exactOut ? 'maximum input' : 'minimum output'} ({formatBps(swap.unbounded.vsQuoteBps)} vs
-              quote).
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
+    <Panel title={title} className="flex flex-col">
       {changes.length ? (
-        <div className="mt-3">
-          {sends.length ? <div className="caps mt-2">You send</div> : null}
-          {sends.map((asset) => (
-            <AssetLine key={asset.mint} asset={asset} a={a} note={notes[asset.mint]} />
-          ))}
-          {receives.length ? <div className="caps mt-3">You receive</div> : null}
-          {receives.map((asset) => (
+        <div className="divide-y divide-line">
+          {[...sends, ...receives].map((asset) => (
             <AssetLine key={asset.mint} asset={asset} a={a} note={notes[asset.mint]} />
           ))}
         </div>
-      ) : !a.err ? (
-        <p className="mt-2 text-sm text-ink-2">Nothing moves in or out of this address.</p>
-      ) : null}
-
-      {cost > 0n ? (
-        <p className="mt-2 text-xs text-ink-3">
-          Network fee {lamportsToSol(cost)} SOL{' '}
-          {formatUsd(usdValue({ mint: SOL, decimals: 9 }, cost, a.tokens)) &&
-            `· ${formatUsd(usdValue({ mint: SOL, decimals: 9 }, cost, a.tokens))}`}
+      ) : (
+        <p className="py-2 text-sm text-ink-2">
+          {a.err ? 'Nothing moves: the transaction reverts.' : 'Nothing moves in or out of this address.'}
         </p>
-      ) : null}
-    </div>
+      )}
+      <div className="mt-auto space-y-0.5 pt-2 text-[11px] text-ink-2">
+        {p ? (
+          <div className="truncate">
+            {p.unit} = {p.effective}
+            {p.market ? <span className="text-ink-3"> · market {p.market}</span> : null}
+          </div>
+        ) : null}
+        {cost > 0n ? (
+          <div className="truncate">
+            Network fee <span className="text-neg">−{lamportsToSol(cost)} SOL</span>{' '}
+            {solUsd(a, cost) && `· ${solUsd(a, cost)}`}
+          </div>
+        ) : null}
+      </div>
+    </Panel>
   );
 };
 
-// ---- Key figures --------------------------------------------------------------------------------
+// ---- Execution ------------------------------------------------------------------------------------
 
-export const KeyFigures: FC<{ a: Analysis }> = ({ a }) => {
+export const ExecutionPanel: FC<{ a: Analysis; quote?: QuoteState; onRequote: () => void }> = ({
+  a,
+  quote,
+  onRequote,
+}) => {
   const j = a.jupiter[0];
+  const otherSigners = a.signers.filter((s) => s !== a.user);
+  const via = a.programs.map((id) => a.labels[id] ?? shortAddress(id));
+
   if (j) {
-    const side = j.exactOut ? 'in' : 'out';
     const decimals = (j.exactOut ? j.inputDecimals : j.outputDecimals) ?? 0;
-    const sym = (j.exactOut ? j.inputMint : j.outputMint)
-      ? symbolOf((j.exactOut ? j.inputMint : j.outputMint)!, a.tokens)
-      : '';
-    const quoted = j.exactOut ? j.quotedInAmount : j.quotedOutAmount;
-    if (j.failed) {
-      return (
-        <FigStrip>
-          <FigCell
-            label="Short of limit"
-            value={j.unbounded ? formatBps(Math.abs(j.unbounded.vsLimitBps)).replace(/^[+−]/, '') : '—'}
-            tone="neg"
-          />
-          <FigCell label="Slippage" value={formatPct(j.slippageBps)} />
-          <FigCell
-            label={`Quoted ${side}`}
-            value={quoted !== undefined ? formatAmount(quoted, decimals, { maxFraction: 2 }) : '—'}
-            sub={sym}
-          />
-        </FigStrip>
-      );
-    }
+    const sym = symbolOf((j.exactOut ? j.inputMint : j.outputMint) ?? '', a.tokens);
+    const simulated = j.exactOut ? j.inAmount : j.outAmount;
+    const fresh = quote?.quote;
+    const freshAmount = fresh ? (j.exactOut ? fresh.inAmount : fresh.outAmount) : undefined;
+    const freshVsTx =
+      freshAmount !== undefined && simulated
+        ? (((j.exactOut ? -1 : 1) * Number(freshAmount - simulated)) / Number(simulated)) * 10_000
+        : undefined;
     return (
-      <FigStrip>
-        <FigCell
-          label="vs quote"
-          value={formatBps(j.vsQuoteBps) || '—'}
-          tone={bpsTone(j.vsQuoteBps)}
-          sub={quoted !== undefined ? `quoted ${formatAmount(quoted, decimals, { maxFraction: 2 })}` : undefined}
-        />
-        <FigCell
-          label={j.exactOut ? 'Room to max in' : 'Room to min out'}
-          value={
-            j.headroomUsd !== undefined
-              ? formatUsd(j.headroomUsd)
-              : j.headroom !== undefined
-                ? formatAmount(j.headroom, decimals)
-                : '—'
-          }
-          sub={`slippage ${formatPct(j.slippageBps)}`}
-        />
-        <FigCell
-          label="vs market"
-          value={formatBps(j.vsMarketBps) || '—'}
-          tone={bpsTone(j.vsMarketBps)}
-          sub="Jupiter price"
-        />
-      </FigStrip>
+      <Panel
+        title="Execution"
+        right={
+          <Button
+            kind="outline"
+            size="sm"
+            className="h-7 px-2.5"
+            onClick={onRequote}
+            disabled={quote?.loading || !j.inputMint || !j.outputMint}
+          >
+            <RefreshIcon size={12} className={quote?.loading ? 'animate-spin' : ''} />
+            {fresh ? 'Re-quote' : 'Fresh quote'}
+          </Button>
+        }
+      >
+        <div className="grid grid-cols-3 gap-x-4 gap-y-2">
+          {j.failed ? (
+            <KV
+              label="Short of limit"
+              value={j.unbounded ? `−${formatBps(Math.abs(j.unbounded.vsLimitBps)).replace(/^[+−]/, '')}` : '—'}
+              tone="neg"
+              sub={j.unbounded ? `fills ${formatBps(j.unbounded.vsQuoteBps)} vs quote` : 'route reverts'}
+            />
+          ) : (
+            <KV label="vs quote" value={formatBps(j.vsQuoteBps) || '—'} tone={bpsTone(j.vsQuoteBps)} sub="simulated" />
+          )}
+          <KV
+            label="vs market"
+            value={formatBps(j.vsMarketBps) || '—'}
+            tone={bpsTone(j.vsMarketBps)}
+            sub={j.outUsd !== undefined ? `${formatUsd(j.outUsd)} out` : 'no price'}
+          />
+          <KV
+            label={j.exactOut ? 'Room to max in' : 'Room to min out'}
+            value={
+              j.headroomUsd !== undefined
+                ? formatUsd(j.headroomUsd)
+                : j.headroom !== undefined
+                  ? formatAmount(j.headroom, decimals)
+                  : '—'
+            }
+            sub={j.headroom !== undefined ? `${formatAmount(j.headroom, decimals)} ${sym}` : undefined}
+            title="How much worse the fill can get before the swap reverts; also what a sandwich could take."
+          />
+          <KV
+            className="col-span-3"
+            label="Fresh quote now"
+            value={
+              fresh ? (
+                <>
+                  {formatAmount(freshAmount!, decimals)} {sym}{' '}
+                  {freshVsTx !== undefined ? (
+                    <span className={toneOf(Math.abs(freshVsTx) < 0.05 ? 0 : freshVsTx)}>
+                      {formatBps(freshVsTx)} vs this tx
+                    </span>
+                  ) : null}
+                </>
+              ) : quote?.error ? (
+                <span className="text-neg">failed</span>
+              ) : (
+                <span className="font-normal text-ink-3">not asked yet</span>
+              )
+            }
+            sub={
+              fresh ? `${fresh.route.join(' · ')} · impact ${(fresh.priceImpactPct * 100).toFixed(3)}%` : quote?.error
+            }
+          />
+        </div>
+      </Panel>
     );
   }
 
   const { compute } = a;
-  const used = compute.consumed !== undefined ? Math.round((compute.consumed / compute.limit) * 100) : undefined;
+  const p = prices(a);
+  const fee = (a.fees.total ?? a.fees.base + a.fees.priority) + a.fees.jitoTip;
   return (
-    <FigStrip>
-      {a.swap ? (
-        <FigCell
-          label="vs market"
-          value={formatBps(a.swap.vsMarketBps) || '—'}
-          tone={bpsTone(a.swap.vsMarketBps)}
-          sub="Jupiter price"
-        />
-      ) : null}
-      <FigCell
-        label="Network fee"
-        value={`${lamportsToSol((a.fees.total ?? a.fees.base + a.fees.priority) + a.fees.jitoTip)}`}
-        sub="SOL"
-      />
-      <FigCell
-        label="Compute"
-        value={used !== undefined ? `${used}%` : '—'}
-        sub={compute.consumed !== undefined ? `${compute.consumed.toLocaleString()} CU` : undefined}
-      />
-      <FigCell label="Size" value={`${a.size} B`} sub={`of ${a.maxSize}`} />
-    </FigStrip>
-  );
-};
-
-// ---- Attention ----------------------------------------------------------------------------------
-
-const CheckRow: FC<{ check: Check }> = ({ check }) => (
-  <div className="flex gap-3 py-2">
-    <Dot tone={check.level === 'ok' ? 'pos' : check.level === 'error' ? 'neg' : check.level} className="mt-1.5" />
-    <div className="min-w-0">
-      <div className="text-sm font-medium">{check.title}</div>
-      {check.detail ? <div className="break-words text-xs text-ink-2">{check.detail}</div> : null}
-    </div>
-  </div>
-);
-
-// Only what needs a look: warnings and errors other than the failure the hero already shows.
-export const Attention: FC<{ a: Analysis }> = ({ a }) => {
-  const items = a.checks.filter((c) => (c.level === 'warn' || c.level === 'error') && c.title !== 'Simulation failed');
-  if (!items.length) return null;
-  return (
-    <div className="rounded-card border border-line px-4 py-2">
-      <div className="flex items-center gap-2 pt-1 text-sm font-semibold text-warn">
-        <AlertIcon size={15} /> Worth a look
+    <Panel title={a.swap ? 'Execution' : 'Transaction'}>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+        {a.swap ? (
+          <>
+            <KV
+              label="vs market"
+              value={formatBps(a.swap.vsMarketBps) || '—'}
+              tone={bpsTone(a.swap.vsMarketBps)}
+              sub={
+                a.swap.soldUsd !== undefined
+                  ? `${formatUsd(a.swap.soldUsd)} → ${formatUsd(a.swap.boughtUsd) || '—'}`
+                  : 'no price'
+              }
+            />
+            <KV
+              label={`Price · ${p?.unit ?? ''}`}
+              value={p?.effective ?? '—'}
+              sub={p?.market ? `market ${p.market}` : undefined}
+            />
+          </>
+        ) : (
+          <>
+            <KV label="Network fee" value={`${lamportsToSol(fee)} SOL`} sub={solUsd(a, fee)} />
+            <KV
+              label="Compute"
+              value={compute.consumed !== undefined ? `${compute.consumed.toLocaleString()} CU` : '—'}
+              sub={`limit ${compute.limit.toLocaleString()}`}
+            />
+          </>
+        )}
+        <KV className="col-span-2" label="Route via" value={via.length ? via.join(' · ') : 'Built-in programs only'} />
+        {otherSigners.length ? (
+          <KV
+            className="col-span-2"
+            label={a.swap ? 'Filled by (co-signer)' : 'Also signed by'}
+            value={otherSigners.map((s) => a.labels[s] ?? shortAddress(s, 6)).join(', ')}
+            sub={a.swap ? 'An RFQ fill: the market maker signs too' : undefined}
+          />
+        ) : null}
       </div>
-      {items.map((c, i) => (
-        <CheckRow key={i} check={c} />
-      ))}
-    </div>
+    </Panel>
   );
 };
 
-// ---- Sections -----------------------------------------------------------------------------------
+// ---- Jupiter route -------------------------------------------------------------------------------
 
 const Sparkline: FC<{ series: SeriesPoint[]; quoted?: bigint; limit?: bigint }> = ({ series, quoted, limit }) => {
   const points = series.filter((p) => p.amount !== undefined) as { t: number; amount: bigint }[];
-  if (points.length < 2) return null;
+  if (points.length < 2) {
+    return <div className="flex h-10 items-center text-[11px] text-ink-3">Fills in as it re-simulates…</div>;
+  }
   const values = [
     ...points.map((p) => Number(p.amount)),
     ...(quoted ? [Number(quoted)] : []),
@@ -237,55 +343,41 @@ const Sparkline: FC<{ series: SeriesPoint[]; quoted?: bigint; limit?: bigint }> 
   const min = Math.min(...values);
   const span = Math.max(...values) - min || 1;
   const w = 480;
-  const h = 56;
-  const y = (v: number) => h - 6 - ((v - min) / span) * (h - 12);
+  const h = 40;
+  const y = (v: number) => h - 4 - ((v - min) / span) * (h - 8);
   const x = (i: number) => (i / (points.length - 1)) * w;
   const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(Number(p.amount)).toFixed(1)}`).join(' ');
   return (
-    <div>
-      <svg viewBox={`0 0 ${w} ${h}`} className="h-14 w-full" preserveAspectRatio="none">
-        {quoted ? (
-          <line
-            x1={0}
-            x2={w}
-            y1={y(Number(quoted))}
-            y2={y(Number(quoted))}
-            stroke="var(--ink-3)"
-            strokeDasharray="4 4"
-            vectorEffect="non-scaling-stroke"
-          />
-        ) : null}
-        {limit ? (
-          <line
-            x1={0}
-            x2={w}
-            y1={y(Number(limit))}
-            y2={y(Number(limit))}
-            stroke="var(--neg)"
-            strokeDasharray="2 4"
-            vectorEffect="non-scaling-stroke"
-          />
-        ) : null}
-        <path d={path} fill="none" stroke="var(--pos)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
-      </svg>
-      <div className="flex gap-4 text-[11px] text-ink-3">
-        <span>— simulated, every 5 s</span>
-        <span>- - quote</span>
-        <span className="text-neg">· · limit</span>
-      </div>
-    </div>
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-10 w-full" preserveAspectRatio="none">
+      {quoted ? (
+        <line
+          x1={0}
+          x2={w}
+          y1={y(Number(quoted))}
+          y2={y(Number(quoted))}
+          stroke="var(--ink-3)"
+          strokeDasharray="4 4"
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : null}
+      {limit ? (
+        <line
+          x1={0}
+          x2={w}
+          y1={y(Number(limit))}
+          y2={y(Number(limit))}
+          stroke="var(--neg)"
+          strokeDasharray="2 4"
+          vectorEffect="non-scaling-stroke"
+        />
+      ) : null}
+      <path d={path} fill="none" stroke="var(--accent)" strokeWidth={2} vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 };
 
-const SubHead: FC<{ children: ReactNode }> = ({ children }) => <div className="caps mb-2 mt-5">{children}</div>;
-
-export const SwapSection: FC<{
-  a: Analysis;
-  swap: JupiterSwap;
-  series: SeriesPoint[];
-  quote?: QuoteState;
-  onRequote: () => void;
-}> = ({ a, swap, series, quote, onRequote }) => {
+export const RoutePanel: FC<{ a: Analysis; swap: JupiterSwap; series: SeriesPoint[] }> = ({ a, swap, series }) => {
+  const [showHops, setShowHops] = useState(false);
   const inSym = swap.inputMint ? symbolOf(swap.inputMint, a.tokens) : '?';
   const outSym = swap.outputMint ? symbolOf(swap.outputMint, a.tokens) : '?';
   const fmt = (v: bigint | undefined, side: 'in' | 'out') =>
@@ -297,231 +389,273 @@ export const SwapSection: FC<{
   const limit = swap.exactOut ? swap.maxInAmount : swap.minOutAmount;
   const simulated = swap.exactOut ? swap.inAmount : swap.outAmount;
 
-  const fresh = quote?.quote;
-  const freshAmount = fresh ? (swap.exactOut ? fresh.inAmount : fresh.outAmount) : undefined;
-  const freshVsTx =
-    freshAmount !== undefined && simulated
-      ? (((swap.exactOut ? -1 : 1) * Number(freshAmount - simulated)) / Number(simulated)) * 10_000
-      : undefined;
-  const venues = [...new Set(swap.hops.map((h) => h.label))];
-
   return (
-    <Section
-      title="Jupiter swap"
-      summary={venues.length ? venues.slice(0, 3).join(', ') + (venues.length > 3 ? '…' : '') : swap.instruction}
-    >
-      <div className="grid grid-cols-3 gap-x-4 gap-y-4">
-        <Stat label={`Quoted ${side}`} value={fmt(quoted, side)} />
-        <Stat
-          label={`Simulated ${side}`}
-          value={swap.failed ? <span className="text-neg">Reverts</span> : fmt(simulated, side)}
-          sub={
-            swap.vsQuoteBps !== undefined ? (
-              <span className={toneOf(swap.vsQuoteBps)}>{formatBps(swap.vsQuoteBps)}</span>
-            ) : undefined
-          }
-        />
-        <Stat
-          label={`${swap.exactOut ? 'Max in' : 'Min out'} · ${formatPct(swap.slippageBps)}`}
-          value={fmt(limit, side)}
-        />
-        <Stat
-          label="Value in → out"
-          value={`${formatUsd(swap.inUsd) || '—'} → ${formatUsd(swap.outUsd) || '—'}`}
-          className="col-span-2"
-        />
-        <Stat
-          label="Fees"
-          value={`Platform ${formatPct(swap.platformFeeBps)}`}
-          sub={
-            swap.positiveSlippageBps !== undefined
-              ? `Positive slippage cap ${formatPct(swap.positiveSlippageBps)}`
-              : undefined
-          }
-        />
-      </div>
-
-      <div className="mt-5 flex items-center gap-3 rounded-card bg-tint px-4 py-3">
-        <div className="min-w-0 flex-1">
-          {fresh ? (
-            <>
-              <div className="text-sm font-semibold">
-                Fresh quote {fmt(freshAmount, side)}{' '}
-                {freshVsTx !== undefined ? <span className={toneOf(freshVsTx)}>{formatBps(freshVsTx)}</span> : null}
-              </div>
-              <div className="truncate text-xs text-ink-2">
-                {fresh.route.join(' · ')} · impact {(fresh.priceImpactPct * 100).toFixed(3)}%
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="text-sm font-semibold">Is this still the best route?</div>
-              <div className="text-xs text-ink-2">
-                {quote?.error ? `Quote failed: ${quote.error}` : 'Ask Jupiter for the same trade now.'}
-              </div>
-            </>
-          )}
-        </div>
-        <Button
-          kind="outline"
-          size="sm"
-          onClick={onRequote}
-          disabled={quote?.loading || !swap.inputMint || !swap.outputMint}
-        >
-          <RefreshIcon size={13} className={quote?.loading ? 'animate-spin' : ''} />
-          {fresh ? 'Re-quote' : 'Quote'}
-        </Button>
-      </div>
-
-      {series.filter((p) => p.amount !== undefined).length > 1 ? (
-        <>
-          <SubHead>Simulated {side} over time</SubHead>
-          <Sparkline series={series} quoted={quoted} limit={limit} />
-        </>
-      ) : null}
-
-      {swap.route.length ? (
-        <>
-          <SubHead>Route plan</SubHead>
-          <div className="space-y-2">
-            {swap.route.map((step, i) => (
-              <div key={i} className="flex items-center gap-3 text-sm">
-                <span className="w-32 shrink-0 truncate">{step.label}</span>
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint">
-                  <div className="h-full rounded-full bg-ink" style={{ width: `${Math.min(100, step.pct)}%` }} />
-                </div>
-                <span className="w-14 shrink-0 text-right text-ink-2">{Number(step.pct.toFixed(1))}%</span>
-              </div>
-            ))}
-          </div>
-        </>
-      ) : null}
-
-      {swap.hops.length ? (
-        <>
-          <SubHead>Simulated hops</SubHead>
-          <div className="divide-y divide-line">
-            {swap.hops.map((hop, i) => {
-              const inDec = a.tokens[hop.inputMint]?.decimals ?? (hop.inputMint === WSOL_MINT ? 9 : undefined);
-              const outDec = a.tokens[hop.outputMint]?.decimals ?? (hop.outputMint === WSOL_MINT ? 9 : undefined);
-              const amt = (v: bigint, d?: number) =>
-                d !== undefined ? formatAmount(v, d, { maxFraction: 2 }) : v.toString();
-              return (
-                <div key={i} className="flex items-center gap-3 py-2 text-sm">
-                  <span className="w-28 shrink-0 truncate font-medium" title={hop.program ?? hop.amm}>
-                    {hop.label}
-                  </span>
-                  <span className="truncate text-ink-2">
-                    {amt(hop.inputAmount, inDec)} {symbolOf(hop.inputMint, a.tokens)} → {amt(hop.outputAmount, outDec)}{' '}
-                    {symbolOf(hop.outputMint, a.tokens)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      ) : null}
-    </Section>
-  );
-};
-
-export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
-  const { compute, fees, rent } = a;
-  const used = compute.consumed !== undefined ? Math.min(1, compute.consumed / compute.limit) : 0;
-  const rentPaid = rent.created.reduce((s, c) => s + c.lamports, 0n);
-  const rentBack = rent.closed.reduce((s, c) => s + c.lamports, 0n);
-  const total = (fees.total ?? fees.base + fees.priority) + fees.jitoTip;
-  return (
-    <Section title="Fees & compute" summary={`${lamportsToSol(total)} SOL`}>
-      <div className="grid grid-cols-3 gap-x-4 gap-y-4">
-        <Stat label="Base fee" value={`${lamportsToSol(fees.base)} SOL`} />
-        <Stat
-          label="Priority fee"
-          value={`${lamportsToSol(fees.priority)} SOL`}
-          sub={`${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU`}
-        />
-        <Stat label="Jito tip" value={fees.jitoTip ? `${lamportsToSol(fees.jitoTip)} SOL` : 'None'} />
-      </div>
-      {a.priorityFees ? (
-        <p className="mt-3 text-xs text-ink-2">
-          Recent priority fees on these accounts: p50 {a.priorityFees.p50.toLocaleString()} · p75{' '}
-          {a.priorityFees.p75.toLocaleString()} · p90 {a.priorityFees.p90.toLocaleString()} µL/CU
-        </p>
-      ) : null}
-      <div className="mt-5">
-        <div className="flex justify-between text-xs text-ink-2">
-          <span>Compute{compute.explicitLimit ? '' : ' · default limit'}</span>
-          <span>
-            {compute.consumed?.toLocaleString() ?? '—'} / {compute.limit.toLocaleString()} CU
-          </span>
-        </div>
-        <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-tint">
-          <div
-            className={clsx('h-full rounded-full', used > 0.95 ? 'bg-warn' : 'bg-ink')}
-            style={{ width: `${used * 100}%` }}
-          />
-        </div>
-      </div>
-      {rentPaid || rentBack ? (
-        <p className="mt-4 text-sm">
-          {rentPaid
-            ? `${lamportsToSol(rentPaid)} SOL locked as rent in ${rent.created.length} new account${rent.created.length > 1 ? 's' : ''}`
-            : ''}
-          {rentPaid && rentBack ? ' · ' : ''}
-          {rentBack
-            ? `${lamportsToSol(rentBack)} SOL rent back from ${rent.closed.length} closed account${rent.closed.length > 1 ? 's' : ''}`
-            : ''}
-        </p>
-      ) : null}
-    </Section>
-  );
-};
-
-export const ChecksSection: FC<{ a: Analysis }> = ({ a }) => {
-  const passed = a.checks.filter((c) => c.level === 'ok').length;
-  const flagged = a.checks.length - passed;
-  return (
-    <Section
-      title="Checks"
-      summary={
-        <span className="inline-flex items-center gap-1.5">
-          {passed} passed
-          {flagged ? <Pill tone={a.checks.some((c) => c.level === 'error') ? 'neg' : 'warn'}>{flagged}</Pill> : null}
+    <Panel
+      title={`Jupiter route · ${swap.instruction}${swap.exactOut ? ' · exact out' : ''}`}
+      right={
+        <span className="text-[11px] text-ink-3">
+          {swap.route.length} steps · {swap.hops.length} hops
         </span>
       }
     >
-      <div className="divide-y divide-line">
-        {a.checks.map((c, i) => (
-          <CheckRow key={i} check={c} />
-        ))}
+      <div className="grid grid-cols-[1fr_1fr_1fr_190px] gap-x-4">
+        <KV label={`Quoted ${side}`} value={fmt(quoted, side)} />
+        <KV
+          label={`Simulated ${side}`}
+          value={swap.failed ? <span className="text-neg">reverts</span> : fmt(simulated, side)}
+          sub={
+            swap.vsQuoteBps !== undefined ? (
+              <span className={toneText[bpsTone(swap.vsQuoteBps) ?? 'muted']}>
+                {formatBps(swap.vsQuoteBps)} vs quote
+              </span>
+            ) : undefined
+          }
+        />
+        <KV
+          label={`${swap.exactOut ? 'Max in' : 'Min out'} (${formatPct(swap.slippageBps)} slippage)`}
+          value={fmt(limit, side)}
+          sub={`platform fee ${formatPct(swap.platformFeeBps)}${
+            swap.positiveSlippageBps !== undefined ? ` · pos. cap ${formatPct(swap.positiveSlippageBps)}` : ''
+          }`}
+        />
+        <div className="min-w-0">
+          <div className="text-[11px] text-ink-3">Simulated {side} · live</div>
+          <Sparkline series={series} quoted={quoted} limit={limit} />
+        </div>
       </div>
-    </Section>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[11px] text-ink-3">Route</span>
+        {swap.route.map((step, i) => (
+          <span key={i} className="inline-flex items-center gap-1.5 rounded-full bg-tint px-2 py-0.5 text-[12px]">
+            <span className="font-medium">{step.label}</span>
+            <span className="text-ink-3">{Number(step.pct.toFixed(1))}%</span>
+          </span>
+        ))}
+        {swap.hops.length ? (
+          <button
+            type="button"
+            onClick={() => setShowHops(!showHops)}
+            className="ml-auto inline-flex items-center gap-1 text-[12px] font-medium text-ink-2 hover:text-ink"
+          >
+            {swap.hops.length} hops
+            <ChevronDown size={13} className={clsx('transition-transform', showHops && 'rotate-180')} />
+          </button>
+        ) : null}
+      </div>
+
+      {swap.hops.length ? (
+        <>
+          <Collapse open={showHops}>
+            <div className="mt-1.5 grid grid-cols-2 gap-x-6">
+              {swap.hops.map((hop, i) => {
+                const inDec = a.tokens[hop.inputMint]?.decimals ?? (hop.inputMint === WSOL_MINT ? 9 : undefined);
+                const outDec = a.tokens[hop.outputMint]?.decimals ?? (hop.outputMint === WSOL_MINT ? 9 : undefined);
+                const amt = (v: bigint, d?: number) =>
+                  d !== undefined ? formatAmount(v, d, { maxFraction: 2 }) : v.toString();
+                return (
+                  <div key={i} className="flex items-center gap-2 border-b border-line py-1 text-[12px]">
+                    <span className="w-24 shrink-0 truncate font-medium" title={hop.program ?? hop.amm}>
+                      {hop.label}
+                    </span>
+                    <span className="truncate text-ink-2">
+                      {amt(hop.inputAmount, inDec)} {symbolOf(hop.inputMint, a.tokens)} →{' '}
+                      {amt(hop.outputAmount, outDec)} {symbolOf(hop.outputMint, a.tokens)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </Collapse>
+        </>
+      ) : null}
+    </Panel>
   );
 };
 
-export const OthersSection: FC<{ a: Analysis; renderAddress: (address: string) => ReactNode }> = ({
+// ---- Fees & resources -------------------------------------------------------------------------------
+
+function priorityRank(a: Analysis) {
+  const pf = a.priorityFees;
+  if (!pf || !pf.samples) return undefined;
+  const p = Number(a.compute.microLamportsPerCu);
+  return p >= pf.p90 ? '≥ p90' : p >= pf.p75 ? 'p75–p90' : p >= pf.p50 ? 'p50–p75' : p >= pf.p25 ? 'p25–p50' : '< p25';
+}
+
+export const FeesPanel: FC<{ a: Analysis }> = ({ a }) => {
+  const { fees, rent, compute } = a;
+  const total = (fees.total ?? fees.base + fees.priority) + fees.jitoTip;
+  const rentPaid = rent.created.reduce((s, c) => s + c.lamports, 0n);
+  const rentBack = rent.closed.reduce((s, c) => s + c.lamports, 0n);
+  const rentNet = rentBack - rentPaid;
+  return (
+    <Panel title="Fees" right={<span className="text-[11px] text-ink-2">{solUsd(a, total)}</span>}>
+      <div className="grid grid-cols-3 gap-x-4 gap-y-2">
+        <KV label="Total (SOL)" value={lamportsToSol(total)} />
+        <KV
+          label="Base"
+          value={lamportsToSol(fees.base)}
+          sub={`${a.signers.length} signature${a.signers.length > 1 ? 's' : ''}`}
+        />
+        <KV
+          label="Priority"
+          value={lamportsToSol(fees.priority)}
+          sub={`${Number(compute.microLamportsPerCu).toLocaleString()} µL/CU`}
+        />
+        <KV label="Jito tip" value={fees.jitoTip ? lamportsToSol(fees.jitoTip) : '—'} />
+        <KV
+          label="Priority rank"
+          value={priorityRank(a) ?? '—'}
+          sub={a.priorityFees ? `p50 ${a.priorityFees.p50.toLocaleString()} µL` : undefined}
+        />
+        <KV
+          label="Rent (SOL)"
+          value={rentNet ? formatAmount(rentNet, 9, { signed: true, maxFraction: 6 }) : '—'}
+          tone={rentNet > 0n ? 'pos' : rentNet < 0n ? 'neg' : undefined}
+          sub={rentPaid || rentBack ? `${rent.created.length} opened · ${rent.closed.length} closed` : undefined}
+        />
+      </div>
+    </Panel>
+  );
+};
+
+export const ResourcesPanel: FC<{ a: Analysis }> = ({ a }) => {
+  const { compute } = a;
+  const mib = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MiB`;
+  return (
+    <Panel title="Resources">
+      <div className="space-y-2.5">
+        <Bar
+          label={`Compute${compute.explicitLimit ? '' : ' (default limit)'}`}
+          value={compute.consumed ?? 0}
+          max={compute.limit}
+          text={`${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()} CU`}
+        />
+        <Bar
+          label={`Size · ${a.version === 'legacy' ? 'legacy' : `v${String(a.version)}`}`}
+          value={a.size}
+          max={a.maxSize}
+          text={`${a.size} / ${a.maxSize} B`}
+        />
+        {a.loadedAccountsDataSize !== undefined ? (
+          <Bar
+            label="Loaded account data"
+            value={a.loadedAccountsDataSize}
+            max={a.loadedAccountsDataLimit}
+            text={`${mib(a.loadedAccountsDataSize)} / ${mib(a.loadedAccountsDataLimit)}`}
+          />
+        ) : null}
+        <div className="flex justify-between text-[11px]">
+          <span className="text-ink-3">Accounts</span>
+          <span className="text-ink-2">
+            {a.accountKeys.length} total · {a.accountKeys.filter((k) => k.writable).length} writable ·{' '}
+            {a.instructions.length} instructions
+          </span>
+        </div>
+      </div>
+    </Panel>
+  );
+};
+
+// ---- Checks & errors -------------------------------------------------------------------------------
+
+const checkTone: Record<Check['level'], string> = {
+  ok: 'bg-tint text-ink-2',
+  info: 'bg-info-soft text-info',
+  warn: 'bg-warn-soft text-warn',
+  error: 'bg-neg-soft text-neg',
+};
+
+const CheckPill: FC<{ check: Check }> = ({ check }) => (
+  <span
+    title={check.detail}
+    className={clsx(
+      'inline-flex max-w-full items-center gap-1.5 truncate rounded-full px-2.5 py-1 text-[12px] font-medium',
+      checkTone[check.level]
+    )}
+  >
+    <span
+      className={clsx(
+        'h-1.5 w-1.5 shrink-0 rounded-full',
+        { ok: 'bg-pos', info: 'bg-info', warn: 'bg-warn', error: 'bg-neg' }[check.level]
+      )}
+    />
+    <span className="truncate">{check.title}</span>
+  </span>
+);
+
+// Passed checks fold into one pill (their figures are in the panels above); anything that needs a
+// look gets its own. Other touched accounts open below the strip.
+export const ChecksStrip: FC<{ a: Analysis; renderAddress: (address: string) => ReactNode }> = ({
   a,
   renderAddress,
 }) => {
-  if (!a.others.length) return null;
+  const [showOthers, setShowOthers] = useState(false);
+  const passed = a.checks.filter((c) => c.level === 'ok');
+  const flagged = a.checks.filter((c) => c.level !== 'ok');
   return (
-    <Section title="Other accounts" summary={`${a.others.length} touched`}>
-      <p className="mb-2 text-xs text-ink-2">Pools, vaults and other owners whose balances change.</p>
-      <div className="divide-y divide-line">
-        {a.others.map((o) => (
-          <div key={o.owner} className="py-2.5">
-            <div className="text-sm font-medium">{renderAddress(o.owner)}</div>
-            {o.assets.map((asset) => (
-              <div key={asset.mint} className="flex justify-between text-sm">
-                <span className="text-ink-2">{symbolOf(asset.mint, a.tokens)}</span>
-                <span className={toneOf(asset.delta)}>
-                  {formatAmount(asset.delta, asset.decimals, { signed: true })}
-                </span>
+    <div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {passed.length ? (
+          <CheckPill
+            check={{
+              level: 'ok',
+              title: `${passed.length} checks passed`,
+              detail: passed.map((c) => c.title).join('\n'),
+            }}
+          />
+        ) : null}
+        {flagged.map((c, i) => (
+          <CheckPill key={i} check={c} />
+        ))}
+        {a.others.length ? (
+          <button
+            type="button"
+            onClick={() => setShowOthers(!showOthers)}
+            className="ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:bg-hover hover:text-ink"
+          >
+            {a.others.length} other accounts touched
+            <ChevronDown size={13} className={clsx('transition-transform', showOthers && 'rotate-180')} />
+          </button>
+        ) : null}
+      </div>
+      {a.others.length ? (
+        <Collapse open={showOthers}>
+          <div className="mt-2 grid grid-cols-2 gap-x-6 rounded-xl border border-line bg-raised px-3.5 py-1">
+            {a.others.map((o) => (
+              <div key={o.owner} className="border-b border-line py-2 last:border-0">
+                <div className="text-[13px] font-medium">{renderAddress(o.owner)}</div>
+                {o.assets.map((asset) => (
+                  <div key={asset.mint} className="flex justify-between text-[12px]">
+                    <span className="text-ink-2">{symbolOf(asset.mint, a.tokens)}</span>
+                    <span className={toneOf(asset.delta)}>
+                      {formatAmount(asset.delta, asset.decimals, { signed: true })}
+                    </span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
-        ))}
-      </div>
-    </Section>
+        </Collapse>
+      ) : null}
+    </div>
+  );
+};
+
+export const ErrorBanner: FC<{ a: Analysis }> = ({ a }) => {
+  if (!a.error) return null;
+  const swap = a.jupiter[0];
+  return (
+    <div className="rounded-xl bg-neg-soft px-3.5 py-2.5">
+      <div className="text-[14px] font-semibold text-neg">{a.error.name ?? 'Simulation failed'}</div>
+      <div className="break-words text-[12px] text-ink-2">{a.error.text}</div>
+      {swap?.unbounded ? (
+        <div className="mt-1 text-[12px]">
+          Without the limit the route fills {formatBps(swap.unbounded.vsQuoteBps)} vs quote —{' '}
+          <b className="text-neg">{formatBps(Math.abs(swap.unbounded.vsLimitBps)).replace(/^[+−]/, '')}</b> past your{' '}
+          {swap.exactOut ? 'maximum input' : 'minimum output'}.
+        </div>
+      ) : null}
+    </div>
   );
 };

@@ -8,6 +8,7 @@ module.exports = {
       colors: {
         canvas: 'var(--canvas)',
         raised: 'var(--raised)',
+        accent: { DEFAULT: 'var(--accent)', ink: 'var(--accent-ink)' },
         ink: { DEFAULT: 'var(--ink)', 2: 'var(--ink-2)', 3: 'var(--ink-3)' },
         line: { DEFAULT: 'var(--line)', strong: 'var(--line-strong)' },
         hover: 'var(--hover)',

@@ -10,15 +10,15 @@ import { useAccounts } from '../hooks/useAccounts';
 import { AddressLink, InstructionsTab, LogsTab, RawTab } from '../inspect/Details';
 import { jsonReplacer, shortAddress, timeAgo } from '../inspect/format';
 import {
-  Attention,
-  ChecksSection,
-  FeesSection,
-  Hero,
-  KeyFigures,
-  OthersSection,
+  ChecksStrip,
+  ErrorBanner,
+  ExecutionPanel,
+  FeesPanel,
   QuoteState,
+  ResourcesPanel,
+  RoutePanel,
   SeriesPoint,
-  SwapSection,
+  TradePanel,
 } from '../inspect/Summary';
 import { RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
@@ -181,17 +181,28 @@ const TxInspector: FC<{
 
   return (
     <div>
-      <div className="mb-5 flex items-center gap-2 text-xs text-ink-2">
-        <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={live || running} />
-        <span>
-          {running && !analysis ? 'Simulating…' : analysis ? `Simulated ${timeAgo(analysis.simulatedAt)}` : ''}
-          {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
-        </span>
-        <span className="ml-auto" />
-        <Switch checked={live} onChange={setLive} label="Live" />
-        <IconButton label="Simulate again" onClick={run} disabled={running}>
-          <RefreshIcon size={14} className={running ? 'animate-spin' : ''} />
-        </IconButton>
+      <div className="mb-2.5 flex items-center gap-3">
+        <Segmented<TabId>
+          value={tab}
+          onChange={setTab}
+          items={[
+            { id: 'summary', label: 'Summary' },
+            { id: 'instructions', label: `Instructions${analysis ? ` · ${analysis.instructions.length}` : ''}` },
+            { id: 'logs', label: 'Logs' },
+            { id: 'raw', label: 'Raw' },
+          ]}
+        />
+        <div className="ml-auto flex min-w-0 items-center gap-2 text-[11px] text-ink-2">
+          <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={live || running} />
+          <span className="truncate">
+            {running && !analysis ? 'Simulating…' : analysis ? timeAgo(analysis.simulatedAt) : ''}
+            {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
+          </span>
+          <Switch checked={live} onChange={setLive} label="Live" />
+          <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
+            <RefreshIcon size={13} className={running ? 'animate-spin' : ''} />
+          </IconButton>
+        </div>
       </div>
 
       {error ? (
@@ -208,41 +219,29 @@ const TxInspector: FC<{
         )
       ) : (
         <>
-          <Segmented<TabId>
-            className="mb-6"
-            value={tab}
-            onChange={setTab}
-            items={[
-              { id: 'summary', label: 'Summary' },
-              { id: 'instructions', label: 'Instructions' },
-              { id: 'logs', label: 'Logs' },
-              { id: 'raw', label: 'Raw' },
-            ]}
-          />
           <div key={tab} className="fade-in">
             {tab === 'summary' ? (
-              <div className="space-y-6">
-                <Hero a={analysis} />
-                <KeyFigures a={analysis} />
-                <Attention a={analysis} />
-                <div>
-                  {analysis.jupiter.map((swap) => (
-                    <SwapSection
-                      key={swap.path}
-                      a={analysis}
-                      swap={swap}
-                      series={series[swap.path] ?? []}
-                      quote={quotes[swap.path]}
-                      onRequote={() => requote(analysis, swap.path)}
-                    />
-                  ))}
-                  <FeesSection a={analysis} />
-                  <ChecksSection a={analysis} />
-                  <OthersSection
+              <div className="space-y-2.5">
+                <ErrorBanner a={analysis} />
+                <div className="grid grid-cols-2 gap-2.5">
+                  <TradePanel a={analysis} />
+                  <ExecutionPanel
                     a={analysis}
-                    renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
+                    quote={analysis.jupiter[0] ? quotes[analysis.jupiter[0].path] : undefined}
+                    onRequote={() => analysis.jupiter[0] && requote(analysis, analysis.jupiter[0].path)}
                   />
                 </div>
+                {analysis.jupiter.map((swap) => (
+                  <RoutePanel key={swap.path} a={analysis} swap={swap} series={series[swap.path] ?? []} />
+                ))}
+                <div className="grid grid-cols-2 gap-2.5">
+                  <FeesPanel a={analysis} />
+                  <ResourcesPanel a={analysis} />
+                </div>
+                <ChecksStrip
+                  a={analysis}
+                  renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
+                />
               </div>
             ) : null}
             {tab === 'instructions' ? <InstructionsTab a={analysis} /> : null}
@@ -312,19 +311,21 @@ export const Inspect: FC = () => {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-4 py-3 ">
+      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-3 py-2">
         <IconButton label={request?.method === 'paste' ? 'Close' : 'Reject and close'} onClick={() => window.close()}>
           <XIcon size={18} />
         </IconButton>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[15px] font-semibold">
+          <div className="truncate text-[14px] font-semibold leading-tight">
             {request?.origin
               ? request.origin.replace(/^https?:\/\//, '')
               : request
                 ? METHOD_LABEL[request.method]
                 : 'Sherlock'}
           </div>
-          {request?.origin ? <div className="truncate text-xs text-ink-2">{METHOD_LABEL[request.method]}</div> : null}
+          {request?.origin ? (
+            <div className="truncate text-[11px] text-ink-2">{METHOD_LABEL[request.method]}</div>
+          ) : null}
         </div>
         {request ? (
           <div
@@ -337,14 +338,14 @@ export const Inspect: FC = () => {
         ) : null}
       </header>
 
-      <main className="flex-1 px-6 pb-8 pt-5">
+      <main className="flex-1 px-4 pb-4 pt-3">
         {request === undefined ? <Skeleton /> : null}
         {request === null ? <p className="text-sm text-ink-2">This request is no longer in the history.</p> : null}
         {request?.kind === 'message' ? <MessageView request={request} /> : null}
         {request?.kind === 'transactions' ? (
           <>
             {count > 1 ? (
-              <div className="mb-5 flex items-center gap-2">
+              <div className="mb-3 flex items-center gap-2">
                 <Pill>{count} transactions</Pill>
                 <Segmented<string>
                   value={String(txIndex)}
@@ -360,8 +361,8 @@ export const Inspect: FC = () => {
         ) : null}
       </main>
 
-      <footer className="sticky bottom-0 border-t border-line bg-canvas px-6 py-4 ">
-        <Button kind="dark" size="lg" className="w-full" onClick={() => window.close()}>
+      <footer className="sticky bottom-0 border-t border-line bg-canvas px-4 py-2.5">
+        <Button kind="dark" size="md" className="w-full" onClick={() => window.close()}>
           {request?.method === 'paste' ? 'Done' : 'Reject and close'}
         </Button>
       </footer>

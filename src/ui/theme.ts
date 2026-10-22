@@ -4,12 +4,13 @@ export type ThemeChoice = 'auto' | 'light' | 'dark';
 // can apply the theme before it first paints (no white flash in dark mode).
 const KEY = 'Sherlock-theme';
 
+// Dark (Jupiter colours) unless the user picked otherwise.
 export function getTheme(): ThemeChoice {
   try {
     const value = localStorage.getItem(KEY);
-    return value === 'light' || value === 'dark' ? value : 'auto';
+    return value === 'light' || value === 'auto' ? value : 'dark';
   } catch {
-    return 'auto';
+    return 'dark';
   }
 }
 
@@ -21,8 +22,7 @@ export function applyTheme(theme: ThemeChoice = getTheme()) {
 
 export function setTheme(theme: ThemeChoice) {
   try {
-    if (theme === 'auto') localStorage.removeItem(KEY);
-    else localStorage.setItem(KEY, theme);
+    localStorage.setItem(KEY, theme);
   } catch {
     // Storage blocked: the choice still applies to this window.
   }

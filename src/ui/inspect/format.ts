@@ -56,8 +56,9 @@ export function iconOf(mint: string, tokens: Record<string, TokenInfo>) {
 
 export const lamportsToSol = (lamports: bigint) => formatAmount(lamports, 9, { maxFraction: 6 });
 
+// Signed values: negative red, positive green, zero in the normal text colour.
 export const toneOf = (value: number | bigint | undefined) =>
-  value === undefined ? '' : value > 0 ? 'text-pos' : value < 0 ? 'text-neg' : 'text-ink-2';
+  value === undefined ? '' : value > 0 ? 'text-pos' : value < 0 ? 'text-neg' : '';
 
 export function timeAgo(ms: number) {
   const s = Math.round((Date.now() - ms) / 1000);
