@@ -127,6 +127,8 @@ type Exports = {
   svm_reset_with_features(ptr: bigint, len: bigint): void;
   svm_set_account(ptr: bigint, len: bigint): number;
   svm_simulate(ptr: bigint, len: bigint): number;
+  svm_execute(ptr: bigint, len: bigint): number;
+  svm_get_accounts(ptr: bigint, len: bigint): void;
 };
 
 let wasmSource: string | URL | Uint8Array | undefined;
@@ -167,7 +169,11 @@ export async function releaseWasmSvm() {
   if (current) (await current.catch(() => undefined))?.svm_drop();
 }
 
-function call(wasm: Exports, fn: 'svm_set_account' | 'svm_simulate' | 'svm_reset_with_features', bytes: Uint8Array) {
+function call(
+  wasm: Exports,
+  fn: 'svm_set_account' | 'svm_simulate' | 'svm_execute' | 'svm_get_accounts' | 'svm_reset_with_features',
+  bytes: Uint8Array
+) {
   const len = BigInt(bytes.length);
   const ptr = wasm.svm_alloc(len);
   new Uint8Array(wasm.memory.buffer, Number(ptr), bytes.length).set(bytes);
@@ -454,26 +460,45 @@ export function simulateInWasm(
   return run;
 }
 
-async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSimOptions): Promise<WasmSimResult> {
+// Everything a run needs, fetched in one consistent round and pushed into the VM.
+type Prepared = {
+  wasm: Exports;
+  loader: Loader;
+  state: Map<string, Acc | undefined>;
+  txs: { keys: string[]; loaded: { writable: string[]; readonly: string[] } }[];
+  programData: string[];
+  mints: Map<string, Acc | undefined>;
+  feat: { packed: Uint8Array; count: number };
+  timings: { loadWasmMs: number; fetchMs: number; setAccountsMs: number };
+};
+
+async function prepare(rpcUrl: string, txList: Uint8Array[], options: WasmSimOptions): Promise<Prepared> {
   const t0 = performance.now();
   const wasm = await loadModule();
   const t1 = performance.now();
 
-  const tx = parseTransaction(txBytes);
-  if (!tx) throw new Error('could not decode transaction');
+  const parsed = txList.map((bytes, i) => {
+    const tx = parseTransaction(bytes);
+    if (!tx) throw new Error(`could not decode transaction${txList.length > 1 ? ` ${i}` : ''}`);
+    return tx;
+  });
   const cache = options.programCache ?? (defaultCache ??= createDefaultProgramCache());
   const loader = new Loader(rpcUrl, cache);
   const featuresPromise = activeFeatures(wasm, rpcUrl, cache);
 
-  // Round 1: lookup tables.
-  await loader.load(tx.lookups.map((l) => l.accountKey));
-  const loaded = { writable: [] as string[], readonly: [] as string[] };
-  for (const l of tx.lookups) {
-    const table = lookupTableAddresses(loader.accounts.get(l.accountKey), l.accountKey);
-    loaded.writable.push(...l.writableIndexes.map((i) => table[i]));
-    loaded.readonly.push(...l.readonlyIndexes.map((i) => table[i]));
-  }
-  const keys = [...tx.staticKeys, ...loaded.writable, ...loaded.readonly];
+  // Round 1: lookup tables (of every transaction).
+  const tables = [...new Set(parsed.flatMap((tx) => tx.lookups.map((l) => l.accountKey)))];
+  await loader.load(tables);
+  const txs = parsed.map((tx) => {
+    const loaded = { writable: [] as string[], readonly: [] as string[] };
+    for (const l of tx.lookups) {
+      const table = lookupTableAddresses(loader.accounts.get(l.accountKey), l.accountKey);
+      loaded.writable.push(...l.writableIndexes.map((i) => table[i]));
+      loaded.readonly.push(...l.readonlyIndexes.map((i) => table[i]));
+    }
+    return { keys: [...tx.staticKeys, ...loaded.writable, ...loaded.readonly], loaded };
+  });
+  const keys = [...new Set(txs.flatMap((t) => t.keys))];
 
   // Token balance overrides: resolve the mint's program and the ATA, so the ATA is fetched too.
   const tokenOverrides: { address: string; mint: string; owner: string; amount: bigint; program: string }[] = [];
@@ -491,8 +516,8 @@ async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSi
   await loader.useCachedImmutable(keys);
 
   // Round 2, one batch so the state and the clock come from about the same slot (prop AMMs
-  // reject quotes whose oracle update looks newer than the clock): every transaction account,
-  // the sysvars, and override targets.
+  // reject quotes whose oracle update looks newer than the clock): every account of every
+  // transaction, the sysvars, and override targets.
   await loader.load([...keys, ...SYSVARS, ...tokenOverrides.map((t) => t.address)]);
   await loader.cacheImmutable(keys);
   // Round 3: program data of upgradeable programs, and mints of token accounts (for decimals).
@@ -502,11 +527,15 @@ async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSi
     if (pd) programDataOf.set(pd, k);
   }
   const programData = [...programDataOf.keys()];
-  const mintKeys = keys
+  const mintKeys = [...keys, ...tokenOverrides.map((t) => t.address)]
     .map((k) => loader.accounts.get(k))
     .filter((a) => a && (a.owner === TOKEN_PROGRAM || a.owner === TOKEN_2022_PROGRAM) && a.data.length >= 165)
     .map((a) => decodeAddress(a!.data.subarray(0, 32)));
-  const [feat] = await Promise.all([featuresPromise, loader.loadProgramData(programDataOf), loader.load(mintKeys)]);
+  const [feat] = await Promise.all([
+    featuresPromise,
+    loader.loadProgramData(programDataOf),
+    loader.load([...mintKeys, ...tokenOverrides.map((t) => t.mint)]),
+  ]);
   const t2 = performance.now();
 
   // A new feature set means a new VM (program runtime environments depend on it).
@@ -549,10 +578,9 @@ async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSi
 
   // Push into the VM: sysvars, then plain accounts and program data, then programs (they need
   // their program data present to compile). Absent accounts are pushed as empty, which removes
-  // whatever an earlier simulation left.
+  // whatever an earlier run left (including state committed by a sequence).
   const empty: Acc = { lamports: 0n, owner: SYSTEM_PROGRAM, data: new Uint8Array(), executable: false, rentEpoch: 0n };
   const programs: string[] = [];
-  const tables = tx.lookups.map((l) => l.accountKey); // the VM resolves lookups itself
   for (const address of [...SYSVARS, ...tables, ...programData, ...keys, ...tokenOverrides.map((t) => t.address)]) {
     const acc = state.get(address);
     if (address === INSTRUCTIONS_SYSVAR || acc?.owner === NATIVE_LOADER) continue;
@@ -576,50 +604,178 @@ async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSi
   }
   const t3 = performance.now();
 
-  // The VM takes the raw wire bytes (bincode VersionedTransaction, legacy/v0/v1).
-  if (call(wasm, 'svm_simulate', txBytes) !== 0) throw new Error(readOut(wasm).error);
-  const out = readOut(wasm);
-  const t4 = performance.now();
+  const mints = new Map([...state].filter(([k]) => mintKeys.includes(k) || tokenOverrides.some((t) => t.mint === k)));
+  return {
+    wasm,
+    loader,
+    state,
+    txs,
+    programData,
+    mints,
+    feat,
+    timings: { loadWasmMs: t1 - t0, fetchMs: t2 - t1, setAccountsMs: t3 - t2 },
+  };
+}
 
-  // Map onto simulateTransaction's shape.
-  const post = new Map<string, Acc>();
-  for (const p of out.postAccounts as any[]) {
-    post.set(p.pubkey, {
-      lamports: BigInt(p.lamports),
-      owner: p.owner,
-      data: fromBase64(p.data),
-      executable: p.executable,
-      rentEpoch: 0n,
-    });
-  }
-  const preAcc = keys.map((k) => state.get(k));
-  const postAcc = keys.map((k, i) => post.get(k) ?? preAcc[i]);
-  const postBalances = postAcc.map((a) => Number(a?.lamports ?? 0n));
-  if (out.err && post.size === 0 && postBalances.length) postBalances[0] = Math.max(0, postBalances[0] - out.fee);
-  const mints = new Map([...state].filter(([k]) => mintKeys.includes(k)));
-  const value = {
+const clockSlot = (state: Map<string, Acc | undefined>) => {
+  const clock = state.get(SYSVARS[0]);
+  return clock ? Number(readU64(clock.data, 0)) : 0;
+};
+
+// simulateTransaction's `value` from the VM's output and the accounts before/after.
+function toValue(
+  out: any,
+  preAcc: (Acc | undefined)[],
+  postAcc: (Acc | undefined)[],
+  mints: Map<string, Acc | undefined>,
+  loaded: { writable: string[]; readonly: string[] },
+  loadedAccountsDataSize: number
+) {
+  return {
     err: out.err,
     logs: out.logs,
     fee: out.fee,
     unitsConsumed: out.unitsConsumed,
     returnData: out.returnData,
     preBalances: preAcc.map((a) => Number(a?.lamports ?? 0n)),
-    postBalances,
+    postBalances: postAcc.map((a) => Number(a?.lamports ?? 0n)),
     preTokenBalances: preAcc.map((a, i) => tokenBalance(i, a, mints)).filter(Boolean),
     postTokenBalances: postAcc.map((a, i) => tokenBalance(i, a, mints)).filter(Boolean),
     innerInstructions: out.innerInstructions,
     loadedAddresses: loaded,
-    loadedAccountsDataSize: [...keys, ...programData].reduce((n, k) => n + (state.get(k)?.data.length ?? 0), 0),
+    loadedAccountsDataSize,
     accounts: null,
   };
-  const clock = state.get(SYSVARS[0]);
+}
+
+async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSimOptions): Promise<WasmSimResult> {
+  const p = await prepare(rpcUrl, [txBytes], options);
+  const { wasm, state, mints, feat } = p;
+  const { keys, loaded } = p.txs[0];
+  const t3 = performance.now();
+
+  // The VM takes the raw wire bytes (legacy/v0/v1).
+  if (call(wasm, 'svm_simulate', txBytes) !== 0) throw new Error(readOut(wasm).error);
+  const out = readOut(wasm);
+  const t4 = performance.now();
+
+  const post = new Map<string, Acc>();
+  for (const a of out.postAccounts as any[]) post.set(a.pubkey, jsonAcc(a)!);
+  const preAcc = keys.map((k) => state.get(k));
+  const postAcc = keys.map((k, i) => post.get(k) ?? preAcc[i]);
+  const value = toValue(
+    out,
+    preAcc,
+    postAcc,
+    mints,
+    loaded,
+    [...keys, ...p.programData].reduce((n, k) => n + (state.get(k)?.data.length ?? 0), 0)
+  );
+  // A failed simulation returns no post accounts: only the fee leaves the payer.
+  if (out.err && post.size === 0 && value.postBalances.length) {
+    value.postBalances[0] = Math.max(0, value.postBalances[0] - out.fee);
+  }
   return {
     value,
-    slot: clock ? Number(readU64(clock.data, 0)) : 0,
-    timings: { loadWasmMs: t1 - t0, fetchMs: t2 - t1, setAccountsMs: t3 - t2, simulateMs: t4 - t3 },
-    fetchedBytes: loader.fetchedBytes,
+    slot: clockSlot(state),
+    timings: { ...p.timings, simulateMs: t4 - t3 },
+    fetchedBytes: p.loader.fetchedBytes,
     accountCount: keys.length,
     memoryBytes: wasm.memory.buffer.byteLength,
     activeFeatures: feat.count,
+  };
+}
+
+function jsonAcc(a: any): Acc | undefined {
+  if (!a) return undefined;
+  return {
+    lamports: BigInt(a.lamports),
+    owner: a.owner,
+    data: fromBase64(a.data),
+    executable: a.executable,
+    rentEpoch: 0n,
+  };
+}
+
+// Reads accounts as the VM holds them now (null when absent or closed).
+function vmAccounts(wasm: Exports, addresses: string[]): (Acc | undefined)[] {
+  const packed = new Uint8Array(addresses.length * 32);
+  addresses.forEach((a, i) => packed.set(encodeAddress(a), i * 32));
+  call(wasm, 'svm_get_accounts', packed);
+  return (readOut(wasm) as any[]).map(jsonAcc);
+}
+
+// ---------------------------------------------------------------- sequences (bundles)
+
+export type WasmSequenceResult = {
+  // One entry per transaction, in order; undefined for those after the first failure.
+  results: Array<{ value: any; slot: number } | undefined>;
+  // Index of the first failing transaction (the sequence stops there, like a Jito bundle).
+  failedIndex?: number;
+  slot: number;
+  timings: WasmSimTimings;
+  fetchedBytes: number;
+  accountCount: number;
+  memoryBytes: number;
+};
+
+// Runs transactions one after the other, each against the state the previous one left: a bundle
+// simulation that needs no simulateBundle on the RPC. Accounts for all of them are fetched up
+// front in one round and overrides applied once; each transaction is executed and committed in
+// the VM (a failed one only pays its fee), and the run stops at the first failure.
+export function simulateSequenceInWasm(
+  rpcUrl: string,
+  txs: Uint8Array[],
+  options: WasmSimOptions = {}
+): Promise<WasmSequenceResult> {
+  const run = queue.then(() => sequenceOnce(rpcUrl, txs, options));
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+async function sequenceOnce(
+  rpcUrl: string,
+  txList: Uint8Array[],
+  options: WasmSimOptions
+): Promise<WasmSequenceResult> {
+  const p = await prepare(rpcUrl, txList, options);
+  const { wasm, state, mints } = p;
+  const slot = clockSlot(state);
+  const t3 = performance.now();
+
+  // Decimals of mints first met mid-sequence (a token account created by an earlier transaction).
+  const mintsFor = (accs: (Acc | undefined)[]) => {
+    const missing = accs
+      .filter((a) => a && (a.owner === TOKEN_PROGRAM || a.owner === TOKEN_2022_PROGRAM) && a.data.length >= 165)
+      .map((a) => decodeAddress(a!.data.subarray(0, 32)))
+      .filter((m) => !mints.has(m));
+    if (missing.length) vmAccounts(wasm, missing).forEach((a, i) => mints.set(missing[i], a));
+  };
+
+  const results: WasmSequenceResult['results'] = txList.map(() => undefined);
+  let failedIndex: number | undefined;
+  for (let i = 0; i < txList.length; i++) {
+    const { keys, loaded } = p.txs[i];
+    const preAcc = vmAccounts(wasm, keys);
+    if (call(wasm, 'svm_execute', txList[i]) !== 0) throw new Error(readOut(wasm).error);
+    const out = readOut(wasm);
+    const postAcc = vmAccounts(wasm, keys);
+    mintsFor([...preAcc, ...postAcc]);
+    const dataSize = [...keys, ...p.programData].reduce((n, k) => n + (state.get(k)?.data.length ?? 0), 0);
+    results[i] = { value: toValue(out, preAcc, postAcc, mints, loaded, dataSize), slot };
+    if (out.err) {
+      failedIndex = i;
+      break;
+    }
+  }
+  const t4 = performance.now();
+  return {
+    results,
+    failedIndex,
+    slot,
+    timings: { ...p.timings, simulateMs: t4 - t3 },
+    fetchedBytes: p.loader.fetchedBytes,
+    accountCount: new Set(p.txs.flatMap((t) => t.keys)).size,
+    memoryBytes: wasm.memory.buffer.byteLength,
   };
 }
