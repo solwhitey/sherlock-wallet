@@ -4,18 +4,18 @@
 
 @layer base {
   :root {
-    --canvas: #ffffff;
+    --canvas: #f5f5f3;
     --raised: #ffffff;
     --accent: #222222;
     --accent-ink: #ffffff;
     --ink: #222222;
     --ink-2: #6a6a6a;
     --ink-3: #929292;
-    --line: #ebebeb;
-    --line-strong: #dddddd;
-    --hover: #f7f7f7;
-    --selected: #f0f0f0;
-    --tint: #f5f2ed;
+    --line: #e6e6e3;
+    --line-strong: #d6d6d2;
+    --hover: #eeeeeb;
+    --selected: #e8e8e5;
+    --tint: #ecebe7;
     --pos: #0e7a54;
     --pos-soft: #e8f5ef;
     --neg: #c13515;
@@ -92,6 +92,39 @@
     border-color: var(--line);
   }
 
+  /* The scrollbar takes its gutter from the start, so content never shifts when it appears, and
+     it follows the theme. */
+  html {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border-radius: 8px;
+    border: 2px solid var(--canvas);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--ink-3);
+  }
+
+  /* Focus rings for keyboard navigation only, in the accent colour. */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 8px;
+  }
+
   body {
     background: var(--canvas);
     color: var(--ink);
@@ -118,7 +151,7 @@
     @apply text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3;
   }
   .field {
-    @apply w-full rounded-xl border border-line-strong bg-canvas px-3.5 py-2.5 text-sm text-ink outline-none transition-shadow placeholder:text-ink-3;
+    @apply w-full rounded-xl border border-line-strong bg-raised px-3.5 py-2.5 text-sm text-ink outline-none transition-shadow placeholder:text-ink-3;
   }
   .field.mono::placeholder {
     font-family: 'Figtree', ui-sans-serif, system-ui, sans-serif;
