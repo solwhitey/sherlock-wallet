@@ -53,6 +53,9 @@ function mintRisks(data: Uint8Array, owner: string) {
   return risks;
 }
 
+// Mint settings change rarely; checked again after 10 minutes.
+const mintCache = new Map<string, { at: number; risks: string[] }>();
+
 export async function safetyChecks(
   rpcUrl: string,
   a: Pick<Analysis, 'user' | 'instructions' | 'labels' | 'userChanges' | 'tokens'>,
@@ -144,11 +147,19 @@ export async function safetyChecks(
   const received = a.userChanges.filter((c) => c.delta > 0n && c.mint !== 'SOL').map((c) => c.mint);
   if (received.length) {
     try {
-      const accounts = await getMultipleAccounts(rpcUrl, received);
-      received.forEach((mint, i) => {
-        const account = accounts[i];
-        if (!account) return;
-        const risks = mintRisks(Uint8Array.from(Buffer.from(account.data[0], 'base64')), account.owner);
+      const stale = received.filter((mint) => (mintCache.get(mint)?.at ?? 0) < Date.now() - 600_000);
+      if (stale.length) {
+        const fetched = await getMultipleAccounts(rpcUrl, stale);
+        stale.forEach((mint, i) => {
+          const account = fetched[i];
+          mintCache.set(mint, {
+            at: Date.now(),
+            risks: account ? mintRisks(Uint8Array.from(Buffer.from(account.data[0], 'base64')), account.owner) : [],
+          });
+        });
+      }
+      received.forEach((mint) => {
+        const risks = mintCache.get(mint)?.risks ?? [];
         if (!risks.length) return;
         const info: TokenInfo | undefined = a.tokens[mint];
         const verified = info?.verified;

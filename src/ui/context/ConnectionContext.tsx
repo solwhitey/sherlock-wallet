@@ -1,5 +1,4 @@
-import { Connection } from '@solana/web3.js';
-import React, { FC, ReactNode, useMemo } from 'react';
+import React, { FC, ReactNode } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
 export const RPC_PRESETS = [
@@ -13,11 +12,9 @@ const DEFAULT_RPC = RPC_PRESETS[0].url;
 const RETIRED_RPCS = ['https://global.rpc.hellomoon.io/'];
 
 export const ConnectionContext = React.createContext<{
-  connection: Connection | undefined;
   rpcUrl: string;
   setRPCUrl: (url: string) => void;
 }>({
-  connection: undefined,
   rpcUrl: '',
   setRPCUrl: (url: string) => {},
 });
@@ -25,12 +22,10 @@ export const ConnectionContext = React.createContext<{
 export const ConnectionProvider: FC<{ children: NonNullable<ReactNode> }> = ({ children }) => {
   const [storedUrl, setRPCUrl] = useLocalStorage<string>('Sherlock-RPC', DEFAULT_RPC);
   const rpcUrl = RETIRED_RPCS.includes(storedUrl) ? DEFAULT_RPC : storedUrl;
-  const connection = useMemo(() => new Connection(rpcUrl, 'confirmed'), [rpcUrl]);
 
   return (
     <ConnectionContext.Provider
       value={{
-        connection,
         rpcUrl,
         setRPCUrl,
       }}

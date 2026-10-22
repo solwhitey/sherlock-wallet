@@ -1,4 +1,4 @@
-import { SOLANA_CHAINS, SolanaChain } from '@solana/wallet-standard';
+import { SOLANA_CHAINS, type SolanaChain } from '@solana/wallet-standard-chains';
 import type {
   SolanaSignAndSendAllTransactionsFeature,
   SolanaSignAndSendAllTransactionsMethod,
@@ -23,7 +23,7 @@ import type {
   Wallet,
   WalletAccount,
 } from '@wallet-standard/core';
-import bs58 from 'bs58';
+import { base58Encode } from '../messages/bytes';
 import type { RPC } from '../messages';
 import { ICON } from './Icon';
 
@@ -31,7 +31,7 @@ export class SolanaWalletAccount implements WalletAccount {
   readonly #publicKey: Uint8Array;
 
   get address() {
-    return bs58.encode(this.publicKey);
+    return base58Encode(this.publicKey);
   }
 
   get publicKey() {

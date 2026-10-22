@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { isAddress as isValidAddress } from '../pubkey';
 import React, { FC, useState } from 'react';
 import type { Account } from '../context/AccountsContext';
 import { useAccounts } from '../hooks/useAccounts';
@@ -13,11 +13,7 @@ export const KNOWN_WALLETS = [
 ];
 
 export function isAddress(value: string) {
-  try {
-    return new PublicKey(value.trim()).toBase58() === value.trim();
-  } catch {
-    return false;
-  }
+  return isValidAddress(value.trim());
 }
 
 export const AccountRow: FC<{ account: Account; selected?: boolean; onSelect?: () => void; onRemove?: () => void }> = ({

@@ -1,4 +1,3 @@
-import { AddressLookupTableAccount, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { BUILTIN_PROGRAMS, decodeBuiltin } from './builtin';
 import { analyzeJupiter, JupiterSwap } from './jupiter';
@@ -13,7 +12,7 @@ import {
   NormalizedIdl,
 } from './idl';
 import { InvokeNode, matchGroups, parseInvokeTree, parseLogs } from './logs';
-import { RouterHops, routerHops } from './flows';
+import { Movement, movementsOf, RouterHops, routerHops } from './flows';
 import { safetyChecks } from './safety';
 import {
   COMPUTE_BUDGET_PROGRAM,
@@ -65,6 +64,8 @@ export type Instr = {
   logs?: string[];
   failed?: string;
   returnData?: string; // base64, top-level only
+  // What this instruction moved, its CPIs included (top-level only).
+  movements?: Movement[];
   inner: Instr[];
 };
 
@@ -172,12 +173,11 @@ async function resolveLookups(rpcUrl: string, tx: ParsedTransaction) {
   lookups.forEach((l, i) => {
     const raw = accounts[i];
     if (!raw) throw new Error(`lookup table ${l.accountKey} not found`);
-    const table = new AddressLookupTableAccount({
-      key: new PublicKey(l.accountKey),
-      state: AddressLookupTableAccount.deserialize(Buffer.from(raw.data[0], 'base64')),
-    });
-    writable.push(...l.writableIndexes.map((j) => table.state.addresses[j].toBase58()));
-    readonly.push(...l.readonlyIndexes.map((j) => table.state.addresses[j].toBase58()));
+    // Lookup table layout: a 56-byte header, then the addresses back to back.
+    const data = Buffer.from(raw.data[0], 'base64');
+    const addressAt = (j: number) => bs58.encode(data.subarray(56 + j * 32, 88 + j * 32));
+    writable.push(...l.writableIndexes.map(addressAt));
+    readonly.push(...l.readonlyIndexes.map(addressAt));
   });
   return { writable, readonly };
 }
@@ -187,7 +187,37 @@ function percentile(sorted: number[], p: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
 }
 
+// Live re-simulation runs every few seconds; only the simulation itself needs to be fresh each time.
+const blockhashCache = new Map<string, { valid: boolean; at: number }>();
+
+async function blockhashValidity(rpcUrl: string, blockhash: string) {
+  const cached = blockhashCache.get(blockhash);
+  // An expired blockhash stays expired; a valid one is checked again after 30 s.
+  if (cached && (!cached.valid || Date.now() - cached.at < 30_000)) return cached.valid;
+  try {
+    const { value } = await rpcCall<{ value: boolean }>(rpcUrl, 'isBlockhashValid', [
+      blockhash,
+      { commitment: 'confirmed' },
+    ]);
+    blockhashCache.set(blockhash, { valid: value, at: Date.now() });
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+const priorityCache = new Map<string, { stats?: PriorityFeeStats; at: number }>();
+
 async function priorityFeeStats(rpcUrl: string, writable: string[]): Promise<PriorityFeeStats | undefined> {
+  const key = writable.slice(0, 128).join(',');
+  const cached = priorityCache.get(key);
+  if (cached && Date.now() - cached.at < 30_000) return cached.stats;
+  const stats = await fetchPriorityFeeStats(rpcUrl, writable);
+  priorityCache.set(key, { stats, at: Date.now() });
+  return stats;
+}
+
+async function fetchPriorityFeeStats(rpcUrl: string, writable: string[]): Promise<PriorityFeeStats | undefined> {
   try {
     const fees = await rpcCall<{ slot: number; prioritizationFee: number }[]>(rpcUrl, 'getRecentPrioritizationFees', [
       writable.slice(0, 128),
@@ -247,11 +277,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
         },
       ]);
   const blockhashPromise =
-    recentBlockhash && !input.execution
-      ? rpcCall<{ value: boolean }>(rpcUrl, 'isBlockhashValid', [recentBlockhash, { commitment: 'confirmed' }])
-          .then((r) => r.value)
-          .catch(() => undefined)
-      : Promise.resolve(undefined);
+    recentBlockhash && !input.execution ? blockhashValidity(rpcUrl, recentBlockhash) : Promise.resolve(undefined);
 
   // An RPC that cannot simulate the transaction (e.g. a format it does not support yet) still
   // leaves everything that can be read from the transaction itself.
@@ -519,6 +545,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const mintOf = (account?: string) =>
     account ? (tokenAccountOwner.get(account)?.mint ?? extraMints.get(account)) : undefined;
   const labelOf = (program: string) => labels[program] ?? `${program.slice(0, 4)}…${program.slice(-4)}`;
+  for (const ix of instructions) ix.movements = movementsOf(ix, mintOf);
   const routers = instructions
     .filter((ix) => ix.programId !== JUPITER_V6)
     .map((ix) => routerHops(ix, mintOf, labelOf, { sold: swap?.sold.mint, bought: swap?.bought.mint }))
@@ -654,6 +681,8 @@ async function measureShortfall(rpcUrl: string, transaction: Uint8Array, instruc
   }
 }
 
+const tokenMintCache = new Map<string, string>();
+
 // Token accounts moved inside venue calls are not always in the RPC's token balance lists; their
 // mint is the first 32 bytes of their data.
 async function resolveTransferMints(
@@ -662,15 +691,20 @@ async function resolveTransferMints(
   known: Map<string, { owner: string; mint: string }>
 ): Promise<Map<string, string>> {
   const unknown = new Set<string>();
+  const out = new Map<string, string>();
   for (const ix of instructions) {
     for (const inner of ix.inner) {
       const info = inner.parsed?.info as any;
       if (inner.parsed?.type !== 'transfer' || !info?.source || info.mint) continue;
       if (!isTokenProgram(inner.programId)) continue;
-      for (const account of [info.source, info.destination]) if (!known.has(account)) unknown.add(account);
+      for (const account of [info.source, info.destination]) {
+        if (known.has(account)) continue;
+        const cached = tokenMintCache.get(account);
+        if (cached) out.set(account, cached);
+        else unknown.add(account);
+      }
     }
   }
-  const out = new Map<string, string>();
   if (!unknown.size) return out;
   try {
     const list = [...unknown];
@@ -679,7 +713,11 @@ async function resolveTransferMints(
       const data = accounts[i]?.data?.[0];
       if (!data) return;
       const bytes = Buffer.from(data, 'base64');
-      if (bytes.length >= 165) out.set(address, bs58.encode(bytes.subarray(0, 32)));
+      if (bytes.length >= 165) {
+        const mint = bs58.encode(bytes.subarray(0, 32));
+        out.set(address, mint);
+        tokenMintCache.set(address, mint); // a token account's mint never changes
+      }
     });
   } catch {
     // Unresolved legs are simply left out.

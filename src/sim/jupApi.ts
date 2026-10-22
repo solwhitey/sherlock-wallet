@@ -40,8 +40,10 @@ export async function getTokenInfos(mints: string[]): Promise<Map<string, TokenI
   const missing: string[] = [];
   for (const mint of new Set(mints)) {
     const cached = await cacheGet<TokenInfo>(`token:${mint}`);
-    if (cached) out.set(mint, cached);
-    else missing.push(mint);
+    if (cached) {
+      // Entries with only a mint mean "not listed": cached too, so they are not asked for again.
+      if (cached.symbol !== undefined || cached.decimals !== undefined) out.set(mint, cached);
+    } else missing.push(mint);
   }
   for (let i = 0; i < missing.length; i += 50) {
     const chunk = missing.slice(i, i + 50);
@@ -62,8 +64,13 @@ export async function getTokenInfos(mints: string[]): Promise<Map<string, TokenI
         // Prices go stale quickly; metadata does not, but one TTL keeps it simple.
         await cacheSet(`token:${t.id}`, info, 60_000);
       }
+      for (const mint of chunk) {
+        if (!out.has(mint)) await cacheSet(`token:${mint}`, { mint }, 600_000);
+      }
     } catch {
-      // Token metadata is decoration; the simulation stands without it.
+      // Token metadata is decoration; the simulation stands without it. Back off for 30 s so a
+      // rate-limited API is not asked again on every re-simulation.
+      for (const mint of chunk) await cacheSet(`token:${mint}`, { mint }, 30_000);
     }
   }
   return out;

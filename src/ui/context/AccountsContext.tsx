@@ -1,10 +1,11 @@
 import type { FC, ReactNode } from 'react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { rpc } from '../rpc';
-import { PublicKey } from '@solana/web3.js';
+import { base58Encode } from '../../messages/bytes';
+import { Pubkey } from '../pubkey';
 import { SerializedAccount } from '../../background/storage';
 
-export type Account = { label: string; address: PublicKey };
+export type Account = { label: string; address: Pubkey };
 
 export const AccountsContext = React.createContext<{
   accounts: Account[];
@@ -28,7 +29,7 @@ export const AccountsProvider: FC<{ children: NonNullable<ReactNode> }> = ({ chi
     const serializedAccounts = (await rpc.callMethod('getAccounts')) as SerializedAccount[];
     const accounts = serializedAccounts.map(({ label, address }) => ({
       label,
-      address: new PublicKey(address),
+      address: new Pubkey(address),
     }));
     setAccounts(accounts);
   }, []);
@@ -53,7 +54,7 @@ export const AccountsProvider: FC<{ children: NonNullable<ReactNode> }> = ({ chi
   const updateConnectedAddress = useCallback(async () => {
     const connectedAccounts = await rpc.callMethod('connectedAccounts');
     if (connectedAccounts) {
-      setConnectedAddress(new PublicKey(connectedAccounts[0]?.publicKey).toBase58());
+      setConnectedAddress(base58Encode(Uint8Array.from(connectedAccounts[0]?.publicKey ?? [])));
     }
   }, []);
 

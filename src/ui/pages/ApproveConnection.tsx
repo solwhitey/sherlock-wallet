@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { Pubkey } from '../pubkey';
 import type { FC } from 'react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { AccountRow, isAddress } from '../components/Accounts';
@@ -40,7 +40,7 @@ export const ApproveConnection: FC = () => {
   useEffect(() => {
     const value = pasted.trim();
     if (!isAddress(value)) return;
-    const account: Account = { label: shortAddress(value), address: new PublicKey(value) };
+    const account: Account = { label: shortAddress(value), address: new Pubkey(value) };
     addAccount({ label: account.label, address: value });
     approveConnection([account]);
   }, [pasted, addAccount]);

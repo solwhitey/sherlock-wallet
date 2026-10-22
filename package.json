@@ -17,12 +17,11 @@
   "dependencies": {
     "@solana/kit": "8.5.0",
     "@solana/wallet-standard": "1.1.8",
+    "@solana/wallet-standard-chains": "^1.1.2",
     "@solana/wallet-standard-features": "^1.5.0",
-    "@solana/web3.js": "^1.99.0",
     "@wallet-standard/core": "1.1.2",
     "bs58": "^4.0.1",
     "clsx": "^2.1.1",
-    "jayson": "^4.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.90.0"

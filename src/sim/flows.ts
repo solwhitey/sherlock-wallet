@@ -101,3 +101,40 @@ export function routerHops(
   }
   return hops.length ? { path: ix.path, router: ix.programId, label: label(ix.programId), hops } : undefined;
 }
+
+export type Movement = Transfer & { kind: 'transfer' | 'rent'; path: string };
+
+// Everything an instruction moves, its CPIs included: token and SOL transfers, and the SOL paid
+// to create accounts (rent).
+export function movementsOf(ix: Instr, mintOf: (account?: string) => string | undefined): Movement[] {
+  const out: Movement[] = [];
+  for (const each of [ix, ...ix.inner]) {
+    const t = transferOf(each, mintOf);
+    if (t && t.amount > 0n) {
+      out.push({ ...t, kind: 'transfer', path: each.path });
+      continue;
+    }
+    if (each.programId !== SYSTEM_PROGRAM) continue;
+    const info = each.parsed?.info as any;
+    if (each.parsed?.type === 'createAccount' && info?.lamports) {
+      out.push({
+        kind: 'rent',
+        path: each.path,
+        mint: NATIVE_SOL,
+        amount: BigInt(info.lamports),
+        source: info.source,
+        destination: info.newAccount,
+      });
+    } else if (each.decoded?.name === 'CreateAccount') {
+      out.push({
+        kind: 'rent',
+        path: each.path,
+        mint: NATIVE_SOL,
+        amount: each.decoded.args?.lamports as bigint,
+        source: each.accounts[0]?.address,
+        destination: each.accounts[1]?.address,
+      });
+    }
+  }
+  return out;
+}

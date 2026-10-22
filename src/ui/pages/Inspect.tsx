@@ -29,6 +29,8 @@ import { rpc } from '../rpc';
 import { BundleView } from '../inspect/Bundle';
 
 const RESIMULATE_MS = 5_000;
+const LIVE_MAX_MS = 10 * 60_000;
+const QUOTE_REFRESH_MS = 15_000;
 const SERIES_LIMIT = 120;
 
 const fromBase64 = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -107,12 +109,14 @@ const TxInspector: FC<{
   const onAnalysisRef = useRef(onAnalysis);
   onAnalysisRef.current = active ? onAnalysis : undefined;
   const quotesRef = useRef(quotes);
+  const lastQuoteAt = useRef(0);
   quotesRef.current = quotes;
 
   const requote = useCallback(async (a: Analysis, path: string) => {
     const swap = a.jupiter.find((j) => j.path === path);
     const amount = swap?.exactOut ? swap.outAmount : swap?.inAmount;
     if (!swap?.inputMint || !swap.outputMint || amount === undefined) return;
+    lastQuoteAt.current = Date.now();
     setQuotes((q) => ({ ...q, [path]: { ...q[path], loading: true } }));
     try {
       const quote = await getQuote({
@@ -156,7 +160,9 @@ const TxInspector: FC<{
         return next;
       });
       // Once a fresh quote was asked for, keep it in step with the simulation.
-      for (const path of Object.keys(quotesRef.current)) requote(a, path);
+      if (Date.now() - lastQuoteAt.current > QUOTE_REFRESH_MS) {
+        for (const path of Object.keys(quotesRef.current)) requote(a, path);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -169,11 +175,28 @@ const TxInspector: FC<{
     run();
   }, [run]);
 
+  // Live re-simulation: paused while the window is hidden (caught up when it shows again) and
+  // switched off after 10 minutes, so a forgotten window never keeps polling.
   useEffect(() => {
     if (!live || !active || mode === 'landed') return;
-    const timer = setInterval(run, RESIMULATE_MS);
-    return () => clearInterval(timer);
-  }, [live, active, run, mode]);
+    const startedAt = Date.now();
+    const tick = () => {
+      if (Date.now() - startedAt > LIVE_MAX_MS) {
+        setLive(false);
+        return;
+      }
+      if (!document.hidden) run();
+    };
+    const timer = setInterval(tick, RESIMULATE_MS);
+    const onVisibility = () => {
+      if (!document.hidden) run();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [live, active, run, mode, setLive]);
 
   // Keeps the "… ago" label current.
   const [, setTick] = useState(0);

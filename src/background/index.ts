@@ -1,5 +1,6 @@
 import type { RPC } from '../messages';
 import { CONTENT_PORT_NAME, createPortTransport, createRPC, POPUP_PORT_NAME } from '../messages';
+import { toBase64 } from '../messages/bytes';
 import { asyncState } from '../utils/asyncState';
 import { openPopup, PopupHandle, trackPopup } from '../utils/popup';
 import { clearHistory, getHistory, getRequest, saveRequest } from './requests';
@@ -14,8 +15,6 @@ const popupRPC = (tabId: number) => {
   return state;
 };
 const contentRPCs = new Set<RPC>();
-
-const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {

@@ -1,6 +1,3 @@
-import { PublicKey } from '@solana/web3.js';
-import { Account } from '../ui/context/AccountsContext';
-
 export type SerializedAccount = {
   label: string;
   address: string;

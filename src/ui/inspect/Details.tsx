@@ -68,12 +68,84 @@ const InnerRow: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
   );
 };
 
+// The change of one account over the whole transaction, compact: token first, then SOL.
+const AccountChange: FC<{ acc?: AccountDetail; a: Analysis }> = ({ acc, a }) => {
+  if (!acc) return null;
+  const parts: React.ReactNode[] = [];
+  if (acc.token && acc.token.post !== acc.token.pre) {
+    const d = acc.token.post - acc.token.pre;
+    parts.push(
+      <span key="t" className={toneOf(d)}>
+        {formatAmount(d, acc.token.decimals, { signed: true, maxFraction: 4 })} {symbolOf(acc.token.mint, a.tokens)}
+      </span>
+    );
+  }
+  const sol =
+    acc.preLamports !== undefined && acc.postLamports !== undefined ? BigInt(acc.postLamports - acc.preLamports) : 0n;
+  // Token accounts' lamports are rent; only show SOL moves of other accounts, or account creation/closing.
+  if (sol && (!acc.token || acc.preLamports === 0 || acc.postLamports === 0)) {
+    parts.push(
+      <span key="s" className={toneOf(sol)}>
+        {formatAmount(sol, 9, { signed: true, maxFraction: 6 })} SOL
+      </span>
+    );
+  }
+  if (!parts.length) return null;
+  return <span className="flex flex-col items-end leading-tight">{parts}</span>;
+};
+
+const Movements: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
+  const [all, setAll] = useState(false);
+  const moves = ix.movements ?? [];
+  if (!moves.length) return null;
+  const shown = all ? moves : moves.slice(0, 6);
+  const decimalsOf = (mint: string) =>
+    mint === 'SOL' ? 9 : (a.tokens[mint]?.decimals ?? a.accounts.find((x) => x.token?.mint === mint)?.token?.decimals);
+  return (
+    <div>
+      <div className="caps mb-1.5">Moves · {moves.length}</div>
+      <div className="divide-y divide-line rounded-xl border border-line">
+        {shown.map((m, i) => {
+          const d = decimalsOf(m.mint);
+          return (
+            <div key={i} className="flex items-center gap-2 px-3 py-1.5 text-[13px]">
+              <span className="w-9 shrink-0 text-[11px] text-ink-3">{m.path}</span>
+              <span className="min-w-0 flex-1 truncate">
+                <AddressLink address={m.source ?? '?'} labels={a.labels} />
+                <span className="px-1.5 text-ink-3">→</span>
+                <AddressLink address={m.destination ?? '?'} labels={a.labels} />
+              </span>
+              {m.kind === 'rent' ? <Pill className="px-1.5 py-0.5 text-[10px]">rent</Pill> : null}
+              <span className="shrink-0 font-semibold">
+                {d !== undefined ? formatAmount(m.amount, d, { maxFraction: d > 6 ? 6 : 4 }) : m.amount.toString()}{' '}
+                {symbolOf(m.mint === 'SOL' ? 'SOL' : m.mint, a.tokens)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {moves.length > 6 ? (
+        <button
+          type="button"
+          onClick={() => setAll(!all)}
+          className="mt-1 text-xs font-semibold text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+        >
+          {all ? 'Show fewer' : `Show all ${moves.length}`}
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
 const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
   // The failing instruction opens by itself.
   const [open, setOpen] = useState(!!ix.failed);
   const [showData, setShowData] = useState(false);
+  const details = new Map(a.accounts.map((acc) => [acc.address, acc]));
+  const named = ix.decoded?.accountNames?.length ?? 0;
+  let extra = 0;
   return (
-    <div className={clsx('rounded-card border', ix.failed ? 'border-neg' : 'border-line')}>
+    <div className={clsx('rounded-card border bg-raised', ix.failed ? 'border-neg' : 'border-line')}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -82,7 +154,10 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
         <span className="text-sm text-ink-3">{ix.path}</span>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[15px] font-semibold">{ix.decoded?.name ?? 'Unknown instruction'}</div>
-          <div className="truncate text-xs text-ink-2">{a.labels[ix.programId] ?? ix.programId}</div>
+          <div className="truncate text-xs text-ink-2">
+            {a.labels[ix.programId] ?? ix.programId}
+            {ix.movements?.length ? ` · ${ix.movements.length} move${ix.movements.length > 1 ? 's' : ''}` : ''}
+          </div>
         </div>
         {ix.failed ? <Pill tone="neg">Failed</Pill> : null}
         {ix.decoded?.decodeError ? <Pill tone="warn">Partial</Pill> : null}
@@ -93,7 +168,51 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
       </button>
       <Collapse open={open}>
         <div className="space-y-4 border-t border-line px-4 py-4">
-          {ix.decoded?.args && Object.keys(ix.decoded.args).length ? <Code value={ix.decoded.args} /> : null}
+          <Movements ix={ix} a={a} />
+
+          <div>
+            <div className="caps mb-1.5">Accounts · {ix.accounts.length}</div>
+            <div className="divide-y divide-line">
+              {ix.accounts.map((acc, i) => {
+                // Anchor passes the program itself for an optional account that is not provided.
+                const placeholder = acc.address === ix.programId && i < named;
+                const role = acc.name ?? (i >= named && named ? `extra account #${++extra}` : '');
+                return (
+                  <div key={i} className="flex items-center gap-3 py-1.5 text-[13px]">
+                    <span className="w-5 shrink-0 text-right text-ink-3">{i}</span>
+                    <span className="w-40 shrink-0 truncate text-ink-2" title={role}>
+                      {role}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {placeholder ? (
+                        <span className="text-ink-3">none (optional account not provided)</span>
+                      ) : (
+                        <AddressLink address={acc.address} labels={a.labels} />
+                      )}
+                    </span>
+                    <span className="shrink-0 text-[11px] text-ink-3">
+                      {placeholder
+                        ? ''
+                        : [acc.writable && 'writable', acc.signer && 'signer'].filter(Boolean).join(' · ')}
+                    </span>
+                    <span className="w-36 shrink-0 text-right text-[12px]">
+                      {placeholder ? null : <AccountChange acc={details.get(acc.address)} a={a} />}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-1 text-[11px] text-ink-3">
+              Right column: each account's change over the whole transaction.
+            </p>
+          </div>
+
+          {ix.decoded?.args && Object.keys(ix.decoded.args).length ? (
+            <div>
+              <div className="caps mb-1.5">Arguments</div>
+              <Code value={ix.decoded.args} />
+            </div>
+          ) : null}
           {ix.decoded?.decodeError ? (
             <p className="text-xs text-warn">Decoding stopped: {ix.decoded.decodeError}</p>
           ) : null}
@@ -113,19 +232,7 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
               ) : null}
             </div>
           ) : null}
-          <div>
-            <div className="caps mb-1.5">Accounts</div>
-            {ix.accounts.map((acc, i) => (
-              <div key={i} className="flex items-center gap-3 py-0.5 text-[13px]">
-                <span className="w-5 shrink-0 text-right text-ink-3">{i}</span>
-                <span className="w-36 shrink-0 truncate text-ink-3">{acc.name ?? ''}</span>
-                <AddressLink address={acc.address} labels={a.labels} />
-                <span className="ml-auto shrink-0 text-[11px] text-ink-3">
-                  {[acc.writable && 'writable', acc.signer && 'signer'].filter(Boolean).join(' · ')}
-                </span>
-              </div>
-            ))}
-          </div>
+
           {ix.inner.length ? (
             <div>
               <div className="caps mb-1.5">Inner instructions · {ix.inner.length}</div>

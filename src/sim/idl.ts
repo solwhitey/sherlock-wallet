@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js';
+import { address, createAddressWithSeed, getProgramDerivedAddress } from '@solana/kit';
 import { Reader } from './borsh';
 import { cacheGet, cacheSet } from './cache';
 import { getMultipleAccounts } from './rpc';
@@ -223,9 +223,9 @@ async function inflate(bytes: Uint8Array): Promise<string> {
 }
 
 async function anchorIdlAddress(programId: string) {
-  const program = new PublicKey(programId);
-  const [base] = PublicKey.findProgramAddressSync([], program);
-  return (await PublicKey.createWithSeed(base, 'anchor:idl', program)).toBase58();
+  const program = address(programId);
+  const [base] = await getProgramDerivedAddress({ programAddress: program, seeds: [] });
+  return createAddressWithSeed({ baseAddress: base, programAddress: program, seed: 'anchor:idl' });
 }
 
 const IDL_TTL = 24 * 3600_000;
