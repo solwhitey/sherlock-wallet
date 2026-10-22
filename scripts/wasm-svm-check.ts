@@ -53,7 +53,7 @@ export async function compare(label: string, bytes: Uint8Array, options?: WasmSi
   const w = wasm.value;
   console.log(`\n=== ${label}`);
   console.log(
-    `wasm: err=${JSON.stringify(w.err)} cu=${w.unitsConsumed} fee=${w.fee} slot=${wasm.slot} accounts=${wasm.accountCount} fetched=${(wasm.fetchedBytes / 1024).toFixed(0)}KiB`
+    `wasm: err=${JSON.stringify(w.err)} cu=${w.unitsConsumed} fee=${w.fee} slot=${wasm.slot} accounts=${wasm.accountCount} fetched=${(wasm.fetchedBytes / 1024).toFixed(0)}KiB memory=${(wasm.memoryBytes / 2 ** 20).toFixed(0)}MiB features=${wasm.activeFeatures}`
   );
   console.log(
     `      timings ms: ${Object.entries(wasm.timings)

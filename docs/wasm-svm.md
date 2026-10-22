@@ -1,162 +1,196 @@
 # Solana VM in WebAssembly, inside the extension
 
-**Verdict: feasible with caveats.** LiteSVM 0.16 (Agave 4.2 runtime, sBPF interpreter) compiles to
-**wasm64** (memory64) and runs in Chrome and Node with no backend and no local process. It gives the
-same results as mainnet `simulateTransaction` on legacy, v0 (lookup tables) and v1 transactions,
-Jupiter swaps included: same error, compute units, fee, logs, inner instructions and balance
-changes. Overrides work: an empty wallet given SOL and USDC runs a swap that fails without them.
+**Status: works, integration-ready on the engine side.** LiteSVM 0.16 (Agave 4.2 runtime, sBPF
+interpreter) compiles to **wasm64** (memory64) and runs in Chrome and Node with no backend and no
+local process. It gives the same results as mainnet `simulateTransaction` on legacy, v0 (lookup
+tables) and v1 transactions, Jupiter swaps and the three signature precompiles included: same
+error, compute units, fee, logs, inner instructions and balance changes. Overrides work: an empty
+wallet given SOL and USDC runs a swap that fails without them.
 
-The main caveat: it needs **memory64** (Chrome 133+, Firefox 134+, Node 24+; not Safari), because
-`wasm32` is blocked by the runtime's 64-bit pointer assumptions (below), and memory64 needs a
-nightly Rust toolchain to build.
+The main constraint: it needs **memory64** (Chrome 133+, Firefox 134+, Node 24+; not Safari),
+because `wasm32` is blocked by the runtime's 64-bit pointer assumptions (below), and memory64 needs
+a nightly Rust toolchain to build (pinned in `svm-wasm/rust-toolchain.toml`).
+
+## Integration contract (for the inspector)
+
+- **Where it loads.** Only the inspector window (an extension page) may load it, and only with a
+  dynamic import when fork mode is turned on:
+  ```ts
+  const { simulateInWasm, giveSol, giveTokens, mergeOverrides, releaseWasmSvm } = await import('../sim/wasmSvm');
+  ```
+  Never import `src/sim/wasmSvm.ts` or `src/sim/programCache.ts` statically, and never from the
+  content script, the injected script or the service worker. With the dynamic import Parcel puts
+  the engine in its own chunk (`wasmSvm.*.js`, 70 KB incl. its share of @solana/kit;
+  `programCache.*.js`, 2 KB) and emits `svm.*.wasm` as an asset; nothing is added to the page's own
+  bundle (checked with a webextension-config build of a test page: page bundle 2.1 KB).
+- **The .wasm ships in the extension.** `src/sim/svm.wasm` is committed (built by
+  `svm-wasm/build.sh`); `wasmSvm.ts` loads it with `new URL('./svm.wasm', import.meta.url)`, which
+  Parcel rewrites to the packaged asset (a `chrome-extension://` URL at run time). Nothing is
+  downloaded at run time.
+- **Manifest.** Added (and nothing else changed):
+  `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`.
+  The inspector also needs host permission for the RPC it calls (as for RPC simulation).
+- **API** (`src/sim/wasmSvm.ts`):
+  ```ts
+  simulateInWasm(rpcUrl, txBytes, { overrides?, tokenBalances?, programCache? })
+    → Promise<{ value, slot, timings, fetchedBytes, accountCount, memoryBytes, activeFeatures }>
+  giveSol(address, sol)                       // set X's balance to N SOL (creates the account)
+  giveTokens(owner, mint, uiAmount | { raw }) // set X's ATA for mint M (creates it if missing)
+  mergeOverrides(...overrides)                // combine helpers into one options object
+  releaseWasmSvm()                            // free the VM; call on window close (pagehide)
+  ```
+  `value` has the `simulateTransaction` shape (`err, logs, fee, unitsConsumed, returnData,
+  preBalances, postBalances, preTokenBalances, postTokenBalances, innerInstructions (programIdIndex,
+  accounts, base58 data, stackHeight), loadedAddresses, loadedAccountsDataSize`). Feed it to
+  `analyze({ ..., execution: { value, slot, source: 'wasm' } })`: **`Execution['source']` in
+  `src/sim/analyze.ts` needs a `'wasm'` member** (today `'landed' | 'bundle'`).
+- **One VM per window.** The module instance lives in the page's JS realm, so each inspector window
+  has its own VM, reused across re-simulations (programs stay compiled; calls are queued so they
+  never interleave). `releaseWasmSvm()` drops it; closing the window frees it regardless.
+
+## What changed in round 2
+
+- **Feature set from chain.** The VM is built with the features active on mainnet, read from the
+  feature accounts (`svm_feature_ids` lists the 285 ids this runtime knows; 251 are active on mainnet today),
+  cached for one hour in memory and in IndexedDB. LiteSVM's hard-coded snapshot is no longer used.
+  A changed feature set rebuilds the VM.
+- **Precompiles: ed25519, secp256k1 and secp256r1 all work, without OpenSSL.**
+  `svm-wasm/vendor/agave-precompiles` is agave-precompiles 4.2.2 with only `secp256r1.rs`
+  rewritten on the pure-Rust `p256` crate (same checks in the same order: offsets, r in [1, n-1],
+  low-S s in [1, n/2], SEC1 compressed key, ECDSA-SHA256). ed25519 (ed25519-dalek 1.0.1, as Agave)
+  and secp256k1 (libsecp256k1) are upstream code; ed25519-dalek's rand 0.7 needs getrandom 0.1's
+  `dummy` backend, never called when verifying. `scripts/wasm-svm-precompiles.ts` signs a valid and
+  a tampered message for each and compares with the RPC: valid → `err: null`, tampered →
+  `{"InstructionError":[0,{"Custom":2}]}`, identical on both sides for all three.
+- **Program-code cache in IndexedDB** (`src/sim/programCache.ts`): 64 MB cap, LRU eviction
+  (a `meta` store with last-use times next to the `blobs` store). Keys:
+  `program:<program address>:<deploy slot>` for upgradeable programs (the slot comes from the
+  45-byte ProgramData header fetched each run, so an upgrade misses and refetches),
+  `immutable:<address>` for loader-v1/v2 programs (SPL Token, Memo…, never change). Non-program
+  accounts are never cached: every simulation reads fresh state. Node gets a memory cache with the
+  same cap.
+- **wasm-opt** in `build.sh` (binaryen 133), default `-Oz`.
+- **Pinned toolchain**: `svm-wasm/rust-toolchain.toml` → `nightly-2026-04-24`
+  (rustc 1.97.0-nightly 36ba2c771), with `rust-src` and `llvm-tools`; `cargo build --locked`.
+- Override helpers `giveSol` / `giveTokens` (UI amounts use the mint's decimals) / `mergeOverrides`.
+- `releaseWasmSvm()`, `memoryBytes` and `activeFeatures` in the result.
+
+## Numbers
+
+Sizes (`svm-wasm/build.sh`, with precompiles):
+
+| | bytes | gzip |
+| --- | --- | --- |
+| raw `cargo build --release` | 6 858 860 | — |
+| `wasm-opt -O3` | 5 739 630 | 2 696 213 |
+| **`wasm-opt -Oz` (shipped)** | **5 694 110** | **2 687 680** |
+
+Run time is the same for all three (Node 24, swap fixture, medians of 3 fresh VMs × 4 runs:
+instantiate 3.4 ms, load + compile 15 ms, simulate 8.8 ms for -O3 and -Oz, 9.3 ms raw), so `-Oz`
+ships. It only costs build time (`-Oz` takes several minutes in wasm-opt, `-O3` about one).
+
+Chromium 152, the swap fixture (Jupiter v6, 51 accounts, 7 upgradeable programs, ~700k CU), the
+extension's own Parcel build (webextension config) of a test page served locally, real IndexedDB
+cache:
+
+| Scenario | Total | Fetch | Load + compile | Simulate | Fetched |
+| --- | --- | --- | --- | --- | --- |
+| Cold: empty IndexedDB, fresh VM | 821 ms | 762 ms | 21 ms | 23 ms | 7.35 MB |
+| Warm cache, fresh VM (page reloaded) | 573 ms | 526 ms | 16 ms | 7 ms | 852 KB |
+| Same VM, re-simulation | 182–1 700 ms | 168–1 680 ms | 4–7 ms | 7–9 ms | 852 KB |
+
+Engine chunk import: 4–8 ms. WASM instantiate: 11–22 ms. The VM's own work is ~15–50 ms; the rest
+is RPC latency, which varied 0.17–3 s run to run on the keyed RPC. The 852 KB left on warm runs is
+mostly one 719 KB GoonFi pool account (mutable state, has to be fresh).
+
+**Memory** (swap fixture, Chromium): WASM linear memory **30 MiB after the first run, 38 MiB after
+the second, then flat at 40 MiB** over 12 runs (it never shrinks; `releaseWasmSvm()` frees it). JS
+heap 17 MiB for the whole page.
+
+## Results against mainnet `simulateTransaction`
+
+`scripts/wasm-svm-check.ts`, `sigVerify: false`, `replaceRecentBlockhash: true`, chain feature set:
+
+| Fixture | Format | Result |
+| --- | --- | --- |
+| tx_transfer | v0 | identical (CU 300) |
+| tx_v1 | v1 (SIMD-0385) | identical (CU 150, fee 17 345) |
+| tx_swap | v0 + ALTs, Jupiter v6 | identical when both run in the same slot (CU ~697k, 88 logs, 24 inner ixs, SOL and SPL changes); one slot apart, pool state moves |
+| tx_exactout | v0, Jupiter | identical |
+| tx_ultra | v0, Jupiter Ultra | identical in the same slot |
+| tx_user_rfq | v0, failing RFQ | identical (`Custom 2506`) |
+| tx_hostile | legacy | identical |
+| ed25519 / secp256k1 / secp256r1 | legacy, precompile | identical, valid and tampered |
+
+Override demos (`scripts/wasm-svm-override.ts`), for a fresh random wallet; RPC and wasm both
+fail with `AccountNotFound` without overrides:
+- SPL `TransferChecked` of 100 USDC to another holder, with
+  `mergeOverrides(giveSol(wallet, 0.01), giveTokens(wallet, USDC, 100))`: succeeds (CU 105), the
+  wallet's USDC account is created by the override, 100 → 0, recipient +100, fee 5 000 lamports;
+- Jupiter 100 USDC → SOL swap (round 1; Jupiter's public swap API was rate-limiting during round 2,
+  the script skips it then): succeeds, ~85–93k CU, wallet 0.05 → ~1.015 SOL, USDC 100 → 0.
 
 ## What compiled, what did not
 
 | Target | Result |
 | --- | --- |
-| `wasm32-unknown-unknown` | **Blocked.** `solana-program-runtime` 4.2.2 `src/memory.rs:49`: `error[E0512]: cannot transmute between types of different sizes … source type: u64 (64 bits), target type: &mut T (32 bits)`. Patching that line would compile but be wrong: CPI and syscalls read guest structs with host layouts (`translate_type::<&[u8]>`, `StableInstruction`, `AccountInfo` in `cpi.rs`), which only match SBF's 64-bit layout on a 64-bit host. Every Jupiter route is CPI. |
-| `wasm64-unknown-unknown` (tier 3, `-Zbuild-std`) | **Compiles and runs.** Pointer and `usize` widths match SBF, so the runtime is used unmodified. |
+| `wasm32-unknown-unknown` | **Blocked.** `solana-program-runtime` 4.2.2 `src/memory.rs:49`: `error[E0512]: cannot transmute between types of different sizes … source type: u64 (64 bits), target type: &mut T (32 bits)`. Patching that line would compile but be wrong: CPI and syscalls read guest structs with host layouts (`translate_type::<&[u8]>`, `StableInstruction`, `AccountInfo` in `cpi.rs`), which only match SBF's 64-bit layout on a 64-bit host. |
+| `wasm64-unknown-unknown` (tier 3, `-Zbuild-std`) | **Compiles and runs**, runtime unmodified. |
 
-Other pressure points, all solved without touching the runtime:
+Patches, all outside the runtime:
 
-- **getrandom** (0.2 and 0.3): `compile_error!` on wasm-unknown. Both get a deterministic custom
-  backend (`svm-wasm/src/lib.rs`); a simulation needs no entropy. No wasm-bindgen, no JS imports:
-  the module has **zero imports**.
-- **`std::time::Instant::now()`** panics at run time (`RuntimeError: unreachable` in
-  `solana_svm_measure::Measure::start`). Only `solana-svm-measure` uses it; a patched copy
-  (`svm-wasm/vendor/solana-svm-measure`, via `[patch.crates-io]`) reads timings as zero on wasm.
-- **blst** (C, BLS12-381 syscalls / vote program): Apple clang compiles it for wasm64, but Apple
-  `ar` writes an archive with no wasm symbol index, so linking fails with `undefined symbol:
-  blst_fp_cneg …`. `build.sh` uses `llvm-ar` from the `llvm-tools` component.
-- **JIT**: x86-64 only, and LiteSVM only enables it there; on wasm the interpreter runs.
-- **Threads/rayon, zstd**: not in LiteSVM's dependency graph.
-- **Precompiles** (ed25519 / secp256k1 / secp256r1, LiteSVM feature `precompiles`): **not
-  included**. The feature pulls `openssl-sys` (secp256r1) and fails the build. Transactions with a
-  precompile instruction will not simulate yet.
-- **Transaction decoding**: bincode/serde cannot read v1 (signatures come after the message);
-  `wincode` (the SDK's own wire codec) reads legacy, v0 and v1.
-- LiteSVM is pinned to **0.16.0**: 0.18 needs rustc 1.97.1 and the installed nightly is 1.97.0.
-
-Existing work: none found. The `litesvm` npm package is napi native binaries only (darwin/linux
-x64/arm64), no wasm build; nothing on crates.io/npm/GitHub search for an SVM in wasm.
-
-## Results against mainnet `simulateTransaction`
-
-Same slot, `sigVerify: false`, `replaceRecentBlockhash: true` (`scripts/wasm-svm-check.ts`):
-
-| Fixture | Format | CU (wasm = rpc) | Logs | Inner ixs | Balances |
-| --- | --- | --- | --- | --- | --- |
-| tx_transfer | v0 | 300 | 4 = 4 | 0 | identical |
-| tx_v1 | v1 (SIMD-0385) | 150, fee 17 345 | 2 = 2 | 0 | identical |
-| tx_swap | v0 + ALTs, Jupiter v6, 51 accounts, 7 programs | ~697k | 88 = 88 | 24 = 24 | identical (SOL and SPL) |
-| tx_exactout | v0, Jupiter | ~153k–178k | 40 = 40 | 8 = 8 | identical |
-| tx_ultra | v0, Jupiter Ultra | ~213k–222k | 50 = 50 | 11 = 11 | identical |
-| tx_user_rfq | v0, failing RFQ | 9 095, `Custom 2506` | 11 = 11 | 0 | identical |
-| tx_hostile | legacy | 273 | 5 = 5 | 0 | identical |
-| tx_zeroslip | v0, Jupiter | differs | — | 24 = 24 | the RPC simulated one slot later; prop AMM state moved |
-
-CU varies run to run because the pools move; within one run both sides agree to the unit.
-
-Override proof (`scripts/wasm-svm-override.ts`): a fresh random wallet asks Jupiter for a
-100 USDC → SOL swap. RPC and wasm both fail with `AccountNotFound`. With
-`{ overrides: { [wallet]: { lamports: 0.05 SOL } }, tokenBalances: [{ owner: wallet, mint: USDC, amount: 100e6 }] }`
-the wasm VM runs it: `err: null`, ~85–93k CU, wallet 0.05 → 1.015 SOL, USDC 100 → 0.
-
-One fix that mattered: the clock sysvar must be fetched in the same `getMultipleAccounts` batch as
-the transaction's accounts. With the clock one round earlier, a prop AMM (Tessera) saw an oracle
-update newer than the clock and failed with `0xffff`.
-
-## Numbers
-
-| | |
-| --- | --- |
-| WASM size | 6.75 MB, 2.78 MB gzip (no `wasm-opt`; binaryen not installed) |
-| JS loader | 26 KB in the Parcel bench bundle (incl. its share of @solana/kit) |
-| Instantiate (cold) | 24–35 ms Chrome 152 (`instantiateStreaming`), 15–30 ms Node 24 |
-| Swap fixture, account data | 7.35 MB (ELF-trimmed; 17.7 MB as stored: one program data account is the 10 MiB max, mostly padding) |
-| Swap fixture, fetch | 0.5–1.8 s Node, 1.3 s Chrome (4 RPC round trips) |
-| Swap fixture, load accounts + compile 7 programs | 76–100 ms cold in Chrome, 23–51 ms Node; 2–22 ms warm |
-| Swap fixture, simulate (~700k CU, interpreter) | 30–74 ms cold Chrome, ~27–32 ms warm; 9–40 ms Node |
-| Swap fixture, warm with program cache | **~400 ms total** in Chrome, 848 KB fetched (one 719 KB GoonFi account) |
-| Plain transfer | ~150 ms total, almost all RPC |
-
-Fetch dominates. With program data cached (keyed by the deploy slot from its 45-byte header), a
-swap re-simulation costs one small round trip for the header slices plus the mutable accounts.
+- **getrandom** 0.1/0.2/0.3: `compile_error!` on wasm-unknown → deterministic custom backends /
+  `dummy`. No wasm-bindgen; the module has **zero imports**.
+- **`std::time::Instant::now()`** panics at run time → `svm-wasm/vendor/solana-svm-measure` reads
+  timings as zero on wasm.
+- **blst** (C): Apple `ar` writes no wasm symbol index (`undefined symbol: blst_fp_cneg`) →
+  `build.sh` uses `llvm-ar` from `llvm-tools`.
+- **OpenSSL** (secp256r1 precompile) → `svm-wasm/vendor/agave-precompiles` with `p256`.
+- **v1 decoding**: bincode cannot read v1 → `wincode`.
+- LiteSVM pinned to 0.16.0 (0.18 needs rustc 1.97.1; the pinned nightly is 1.97.0).
 
 ## How it works
 
-- `svm-wasm/` — Rust crate, LiteSVM with a C-style ABI (no wasm-bindgen): `svm_alloc/svm_free`,
-  `svm_reset`, `svm_set_account(packed)`, `svm_simulate(tx wire bytes)`, `svm_out_ptr/len` (JSON).
-  The VM is built with mainnet features, builtins and sysvars, without LiteSVM's bundled SPL ELFs
-  (the real programs come from the RPC), sigverify and blockhash checks off, Agave's 10 KB log cap.
-- `src/sim/wasmSvm.ts` — `simulateInWasm(rpcUrl, txBytes, { overrides, tokenBalances, programCache })`
-  returns `{ value, slot, timings, fetchedBytes, accountCount }`; `value` has the
-  `simulateTransaction` shape (`err, logs, fee, unitsConsumed, returnData, preBalances,
-  postBalances, preTokenBalances, postTokenBalances, innerInstructions (programIdIndex/accounts/
-  base58 data/stackHeight), loadedAddresses, loadedAccountsDataSize`), ready for `analyze()`'s
-  `execution` (add a `'wasm'` source to `Execution['source']`).
+- `svm-wasm/` — Rust crate, LiteSVM with a C-style ABI: `svm_alloc/svm_free`,
+  `svm_feature_ids`, `svm_reset_with_features(packed)`, `svm_set_account(packed)`,
+  `svm_simulate(tx wire bytes)`, `svm_out_ptr/len` (JSON), `svm_drop`. VM = chain features,
+  builtins, sysvars, precompiles, no bundled SPL ELFs (real programs come from the RPC), sigverify
+  and blockhash checks off, Agave's 10 KB log cap.
 - Account loading, 4 round trips: (1) lookup tables; (2) every transaction account + sysvars
-  (clock, rent, epoch schedule, epoch rewards, last restart slot, slot hashes) + override targets,
-  in one batch; (3) program data of upgradeable programs and mints of token accounts (decimals).
-  Program data is fetched as a 557-byte slice first (loader header + ELF header + program headers),
-  then only the ELF's own length (section table end, or furthest segment for SBPFv3 ELFs without
-  sections). Optional `programCache` (`get/set` of bytes) skips the second fetch; back it with
-  IndexedDB in the extension.
-- The VM instance is long-lived: programs are only recompiled when their program data slot changes;
-  every other account is re-pushed each run, and accounts that do not exist are pushed empty so
-  nothing leaks from a previous simulation.
-- Overrides: `overrides[address] = { lamports?, data?, owner?, executable? }` patches or creates any
-  account (programs too); `tokenBalances: [{ owner, mint, amount }]` sets the owner's ATA (created
-  if missing, Token or Token-2022 from the mint's owner). Pre balances reflect the overrides.
-- Token balances are computed in TS from pre/post account data (Token and Token-2022 accounts).
+  (clock, rent, epoch schedule, epoch rewards, last restart slot, slot hashes) + override targets
+  in one batch, so state and clock are from about the same slot (a prop AMM rejected an oracle
+  update newer than the clock when the clock came a round earlier); (3) ProgramData headers
+  (557-byte slices: loader header + ELF header + program headers) and token mints (decimals);
+  (4) only on a cache miss, each program's ELF bytes trimmed to the ELF's own length (one program
+  in the swap is allocated at 10 MiB, mostly padding: 17.7 MB stored → 7.35 MB fetched).
+  Feature accounts (3 calls of ≤100) run in parallel, once an hour.
+- Programs are recompiled in the VM only when their deploy slot changes; every other account is
+  re-pushed each run, and missing accounts are pushed empty so nothing leaks between simulations.
+- Token balances are computed in TS from pre/post account data (Token and Token-2022).
 
 ## Build and run
 
 ```sh
-rustup toolchain install nightly --component rust-src llvm-tools   # once
-svm-wasm/build.sh                     # → src/sim/svm.wasm (not committed; about a minute from cold, seconds after)
+brew install binaryen                                 # wasm-opt, once
+svm-wasm/build.sh                                     # rustup installs the pinned nightly on first use
+                                                      # → src/sim/svm.wasm (committed)
 RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-check.ts tx_transfer.b64 tx_v1.b64 tx_swap.b64
 RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-override.ts
-# browser bench (Parcel bundles the .wasm as an asset):
-npx parcel build scripts/wasm-bench/index.html --dist-dir /tmp/bench --public-url ./
-# serve /tmp/bench with an rpc.txt and a fixture next to it, open index.html?tx=tx_swap.b64
+RPC_URL_FILE=path/to/rpc.txt npx tsx scripts/wasm-svm-precompiles.ts
+# browser bench: build scripts/wasm-bench as an extension page (or with --public-url ./ for a plain
+# page), serve it with rpc.txt and a fixture next to it, open ?tx=tx_swap.b64[&clear=1]
 ```
-
-Extension integration needs, in `src/manifest.json`:
-
-```json
-"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }
-```
-
-plus host permission for the RPC. `new URL('./svm.wasm', import.meta.url)` in `wasmSvm.ts` is what
-Parcel turns into the bundled asset URL (checked with the bench build).
 
 ## Caveats
 
-1. **memory64 only.** Chrome 133+ / Firefox 134+ / Node 24+. No Safari. Building needs nightly +
-   `-Zbuild-std` (tier-3 target); pin a nightly date for reproducible builds.
-2. **No precompiles** (ed25519/secp256k1/secp256r1 verify instructions). Next step: vendor
-   `agave-precompiles` without secp256r1 (openssl), or register pure-Rust versions.
-3. **Feature set** is LiteSVM 0.16's hard-coded mainnet snapshot. A feature activated since then
-   can change CU or behaviour. Fix: fetch the feature accounts and build the `FeatureSet` from them
-   (one `getMultipleAccounts` over ~250 ids, cacheable per epoch).
-4. **State consistency.** Accounts beyond 100 per batch come from several calls (different slots);
-   a live pool can move between the RPC's slot and ours (tx_zeroslip). Same class of issue as any
-   client-side fork; surfpool has it too.
-5. **Not modelled:** epoch stakes (`sol_get_epoch_stake` returns 0), stake history / recent
-   blockhashes / fees sysvars (LiteSVM defaults), `loadedAccountsDataSize` is approximate (program
-   data counted at ELF length, not account length, so a transaction near its loaded-data limit
-   could pass here and fail on chain).
-6. **MV3 service worker** can be stopped after ~30 s idle; the VM (and its compiled programs) is
-   then rebuilt on the next call (~100 ms plus fetch). Keep program bytes in IndexedDB, or run the VM
-   in the popup / an offscreen document.
-7. Memory: the VM keeps every loaded program's bytes and compiled executable until `svm_reset`
-   (not measured; linear memory only grows, so reset it when the program set churns).
-
-## Recommended next step
-
-Integrate behind a setting as an alternative to RPC simulation: `simulateInWasm` → `analyze({
-execution: { value, slot, source: 'wasm' } })`, IndexedDB `programCache`, CSP line above. Then, in
-order: build the feature set from chain, add precompiles without openssl, run `wasm-opt -O3`
-(expect ~20–30 % smaller), and pin the nightly. The override UI (fake balances) is the feature RPC
-simulation cannot offer, so that is where this pays off first.
+1. **memory64 only.** Chrome 133+ / Firefox 134+ / Node 24+. No Safari.
+2. **State consistency.** Batches over 100 accounts come from several calls; a live pool can move
+   between the RPC's slot and ours. Same as any client-side fork.
+3. **Not modelled:** epoch stakes (`sol_get_epoch_stake` returns 0); stake history, recent
+   blockhashes and fees sysvars use LiteSVM defaults; `loadedAccountsDataSize` counts program
+   data at ELF length, so a transaction right at its loaded-data limit could pass here and fail on
+   chain.
+4. **Precompile parity** rests on `p256` matching OpenSSL for secp256r1 (range checks are explicit
+   and identical; tested on valid and tampered signatures, not fuzzed).
+5. Building `-Oz` takes several minutes of wasm-opt; the artifact is committed so UI work never
+   needs Rust.

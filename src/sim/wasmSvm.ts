@@ -7,9 +7,18 @@
 //
 // Extension pages need `'wasm-unsafe-eval'` in their CSP to instantiate the module. The module
 // uses memory64 (Chrome 133+, Node 24+): Solana's runtime assumes 64-bit host pointers.
+//
+// Weight: import this module only from the inspector window, with a dynamic `import()` when fork
+// mode is turned on, never from the content script, the injected script or the service worker.
+// The module instance (and the VM in it) is per JS realm, so each inspector window gets its own,
+// reused across re-simulations; call releaseWasmSvm() when the window closes (closing the page
+// frees it anyway).
 import { getAddressDecoder, getAddressEncoder, getProgramDerivedAddress, type Address } from '@solana/kit';
+import { createDefaultProgramCache, type ProgramCache } from './programCache';
 import { getMultipleAccounts, rpcCall, type RawAccount } from './rpc';
 import { parseTransaction } from './tx';
+
+export type { ProgramCache } from './programCache';
 
 export type AccountOverride = {
   lamports?: bigint | number;
@@ -18,19 +27,18 @@ export type AccountOverride = {
   executable?: boolean;
 };
 
-// Sets `owner`'s associated token account for `mint` to `amount` (creating it if needed).
-export type TokenBalanceOverride = { owner: string; mint: string; amount: bigint | number };
+// Sets `owner`'s associated token account for `mint` to `amount` raw units, or `uiAmount` in
+// the mint's decimals (creating the account if needed).
+export type TokenBalanceOverride = { owner: string; mint: string; amount?: bigint | number; uiAmount?: number };
 
-export type WasmSimOptions = {
+export type Overrides = {
   overrides?: Record<string, AccountOverride>;
   tokenBalances?: TokenBalanceOverride[];
-  // Optional cache hook for immutable-ish blobs (program data), e.g. IndexedDB in the extension.
-  programCache?: ProgramCache;
 };
 
-export type ProgramCache = {
-  get(key: string): Promise<Uint8Array | undefined>;
-  set(key: string, value: Uint8Array): Promise<void>;
+export type WasmSimOptions = Overrides & {
+  // Program code cache. Defaults to IndexedDB (64 MB, LRU) in pages, memory in Node.
+  programCache?: ProgramCache;
 };
 
 export type WasmSimTimings = { loadWasmMs: number; fetchMs: number; setAccountsMs: number; simulateMs: number };
@@ -41,12 +49,48 @@ export type WasmSimResult = {
   timings: WasmSimTimings;
   fetchedBytes: number;
   accountCount: number;
+  memoryBytes: number; // WASM linear memory after the run (it only grows, so this is the peak)
+  activeFeatures: number;
 };
+
+// ---------------------------------------------------------------- override helpers
+
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+// "Give address X N SOL": sets its balance to N SOL (creating a system account if missing).
+export function giveSol(address: string, sol: number): Overrides {
+  return { overrides: { [address]: { lamports: BigInt(Math.round(sol * LAMPORTS_PER_SOL)) } } };
+}
+
+// "Give address X N tokens of mint M": sets X's associated token account balance (creating the
+// account if missing). `amount` is in UI units (decimals read from the mint), or pass
+// { raw: bigint } for base units.
+export function giveTokens(owner: string, mint: string, amount: number | { raw: bigint }): Overrides {
+  return {
+    tokenBalances: [
+      typeof amount === 'number' ? { owner, mint, uiAmount: amount } : { owner, mint, amount: amount.raw },
+    ],
+  };
+}
+
+export function mergeOverrides(...list: Overrides[]): Overrides {
+  return {
+    overrides: Object.assign({}, ...list.map((o) => o.overrides ?? {})),
+    tokenBalances: list.flatMap((o) => o.tokenBalances ?? []),
+  };
+}
 
 const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 const UPGRADEABLE_LOADER = 'BPFLoaderUpgradeab1e11111111111111111111111';
+const LOADER_V4 = 'LoaderV411111111111111111111111111111111111';
+const IMMUTABLE_LOADERS = [
+  'BPFLoader2111111111111111111111111111111111',
+  'BPFLoader1111111111111111111111111111111111',
+];
+const FEATURE_PROGRAM = 'Feature111111111111111111111111111111111111';
+const FEATURES_TTL_MS = 60 * 60 * 1000;
 const NATIVE_LOADER = 'NativeLoader1111111111111111111111111111111';
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 const SYSVARS = [
@@ -78,6 +122,9 @@ type Exports = {
   svm_out_ptr(): bigint;
   svm_out_len(): bigint;
   svm_reset(): void;
+  svm_drop(): void;
+  svm_feature_ids(): void;
+  svm_reset_with_features(ptr: bigint, len: bigint): void;
   svm_set_account(ptr: bigint, len: bigint): number;
   svm_simulate(ptr: bigint, len: bigint): number;
 };
@@ -111,13 +158,22 @@ function loadModule(): Promise<Exports> {
   return instance;
 }
 
-function call(wasm: Exports, fn: 'svm_set_account' | 'svm_simulate', bytes: Uint8Array) {
+// Frees the VM and the module instance (its linear memory is released with the last reference).
+export async function releaseWasmSvm() {
+  const current = instance;
+  instance = undefined;
+  vmPrograms.clear();
+  vmFeatures = undefined;
+  if (current) (await current.catch(() => undefined))?.svm_drop();
+}
+
+function call(wasm: Exports, fn: 'svm_set_account' | 'svm_simulate' | 'svm_reset_with_features', bytes: Uint8Array) {
   const len = BigInt(bytes.length);
   const ptr = wasm.svm_alloc(len);
   new Uint8Array(wasm.memory.buffer, Number(ptr), bytes.length).set(bytes);
   const code = wasm[fn](ptr, len);
   wasm.svm_free(ptr, len);
-  return code;
+  return code as number | void;
 }
 
 function readOut(wasm: Exports) {
@@ -153,13 +209,54 @@ function toAcc(raw: RawAccount): Acc | undefined {
   };
 }
 
+// Account packed for the cache: owner[32] lamports:u64le executable:u8 data.
+function packAcc(acc: Acc) {
+  const buf = new Uint8Array(41 + acc.data.length);
+  buf.set(encodeAddress(acc.owner), 0);
+  new DataView(buf.buffer).setBigUint64(32, acc.lamports, true);
+  buf[40] = acc.executable ? 1 : 0;
+  buf.set(acc.data, 41);
+  return buf;
+}
+
+function unpackAcc(buf: Uint8Array): Acc {
+  return {
+    owner: decodeAddress(buf.subarray(0, 32)),
+    lamports: readU64(buf, 32),
+    executable: buf[40] === 1,
+    data: buf.subarray(41),
+    rentEpoch: 2n ** 64n - 1n,
+  };
+}
+
 class Loader {
   accounts = new Map<string, Acc | undefined>();
   fetchedBytes = 0;
+  private fetched = new Set<string>();
   constructor(
     private rpcUrl: string,
-    private programCache?: ProgramCache
+    private programCache: ProgramCache
   ) {}
+
+  // Programs owned by the immutable loaders (v1/v2: SPL Token, Memo...) never change: reuse their
+  // cached bytes instead of refetching them with the rest of the transaction's accounts.
+  async useCachedImmutable(addresses: string[]) {
+    await Promise.all(
+      [...new Set(addresses)].map(async (a) => {
+        const cached = await this.programCache.get(`immutable:${a}`);
+        if (cached) this.accounts.set(a, unpackAcc(cached));
+      })
+    );
+  }
+
+  async cacheImmutable(addresses: string[]) {
+    for (const a of new Set(addresses)) {
+      const acc = this.accounts.get(a);
+      if (acc?.executable && IMMUTABLE_LOADERS.includes(acc.owner) && this.fetched.has(a)) {
+        await this.programCache.set(`immutable:${a}`, packAcc(acc));
+      }
+    }
+  }
 
   async load(addresses: string[]) {
     const missing = [...new Set(addresses)].filter((a) => !this.accounts.has(a));
@@ -168,14 +265,17 @@ class Loader {
     raws.forEach((raw, i) => {
       if (raw) this.fetchedBytes += Math.floor((raw.data[0].length * 3) / 4);
       this.accounts.set(missing[i], toAcc(raw));
+      this.fetched.add(missing[i]);
     });
   }
 
   // Program data accounts are big (often allocated at the 10 MiB maximum, mostly zero padding)
   // and change only on upgrade. Fetch the 45-byte loader header plus the ELF header first, then
-  // only the ELF's own bytes; with a cache, reuse the bytes stored for that deploy slot.
-  async loadProgramData(addresses: string[]) {
-    const missing = [...new Set(addresses)].filter((a) => !this.accounts.has(a));
+  // only the ELF's own bytes; with the cache, reuse the bytes stored for that program and deploy
+  // slot (an upgrade changes the slot, so it misses and refetches).
+  async loadProgramData(programs: Map<string, string>) {
+    // programs: program data address -> program address
+    const missing = [...programs.keys()].filter((a) => !this.accounts.has(a));
     if (!missing.length) return;
     const headers = await rpcCall<{ value: (RawAccount & { rentEpoch?: number })[] }>(
       this.rpcUrl,
@@ -187,8 +287,9 @@ class Loader {
         const address = missing[i];
         if (!raw) return this.accounts.set(address, undefined);
         const head = fromBase64(raw.data[0]);
-        const key = `programdata:${address}:${readU64(head, 4)}`;
-        const cached = await this.programCache?.get(key);
+        const key = `program:${programs.get(address)}:${readU64(head, 4)}`;
+        this.fetchedBytes += head.length;
+        const cached = await this.programCache.get(key);
         if (cached) return this.accounts.set(address, { ...toAcc(raw)!, data: cached });
         const elfLength = elfSize(head.subarray(PROGRAMDATA_HEADER));
         const result = await rpcCall<{ value: (RawAccount & { rentEpoch?: number })[] }>(
@@ -204,7 +305,7 @@ class Loader {
         const acc = toAcc(result.value[0]);
         if (acc) this.fetchedBytes += acc.data.length;
         this.accounts.set(address, acc);
-        if (acc) await this.programCache?.set(key, acc.data);
+        if (acc) await this.programCache.set(key, acc.data);
       })
     );
   }
@@ -292,23 +393,77 @@ function tokenBalance(index: number, acc: Acc | undefined, mints: Map<string, Ac
   };
 }
 
+// ---------------------------------------------------------------- feature set
+
+// Active features read from the chain's feature accounts (owned by the Feature program, data is
+// bincode Option<u64>: 1 then the activation slot). Packed as id[32] slot:u64le, cached for an
+// hour in memory and in the program cache (so it survives the window).
+let features: { packed: Uint8Array; fetchedAt: number; count: number } | undefined;
+
+async function activeFeatures(wasm: Exports, rpcUrl: string, cache: ProgramCache) {
+  const now = Date.now();
+  if (features && now - features.fetchedAt < FEATURES_TTL_MS) return features;
+  const stored = await cache.get('features:mainnet');
+  if (stored && stored.length >= 8 && now - Number(readU64(stored, 0)) < FEATURES_TTL_MS) {
+    const packed = stored.slice(8);
+    return (features = { packed, fetchedAt: Number(readU64(stored, 0)), count: packed.length / 40 });
+  }
+  wasm.svm_feature_ids();
+  const ids: string[] = readOut(wasm);
+  const chunks = await Promise.all(
+    Array.from({ length: Math.ceil(ids.length / 100) }, (_, i) =>
+      getMultipleAccounts(rpcUrl, ids.slice(i * 100, i * 100 + 100))
+    )
+  );
+  const active: [string, bigint][] = [];
+  chunks.flat().forEach((raw, i) => {
+    const acc = toAcc(raw);
+    if (acc?.owner === FEATURE_PROGRAM && acc.data.length >= 9 && acc.data[0] === 1) {
+      active.push([ids[i], readU64(acc.data, 1)]);
+    }
+  });
+  const record = new Uint8Array(8 + active.length * 40);
+  const view = new DataView(record.buffer);
+  view.setBigUint64(0, BigInt(now), true);
+  active.forEach(([id, slot], i) => {
+    record.set(encodeAddress(id), 8 + i * 40);
+    view.setBigUint64(8 + i * 40 + 32, slot, true);
+  });
+  await cache.set('features:mainnet', record);
+  return (features = { packed: record.slice(8), fetchedAt: now, count: active.length });
+}
+
 // ---------------------------------------------------------------- simulate
 
 // Tracks what the long-lived VM holds, so programs are only recompiled after an upgrade.
-const vmPrograms = new Map<string, string>(); // program address -> programdata slot (or 'inline')
+const vmPrograms = new Map<string, string>(); // program address -> version (deploy slot...)
+let vmFeatures: Uint8Array | undefined; // feature set the VM was built with
+let defaultCache: ProgramCache | undefined;
+let queue: Promise<unknown> = Promise.resolve();
 
-export async function simulateInWasm(
+const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+// Simulations share one VM, so they run one at a time.
+export function simulateInWasm(
   rpcUrl: string,
   txBytes: Uint8Array,
   options: WasmSimOptions = {}
 ): Promise<WasmSimResult> {
+  const run = queue.then(() => simulateOnce(rpcUrl, txBytes, options));
+  queue = run.catch(() => undefined);
+  return run;
+}
+
+async function simulateOnce(rpcUrl: string, txBytes: Uint8Array, options: WasmSimOptions): Promise<WasmSimResult> {
   const t0 = performance.now();
   const wasm = await loadModule();
   const t1 = performance.now();
 
   const tx = parseTransaction(txBytes);
   if (!tx) throw new Error('could not decode transaction');
-  const loader = new Loader(rpcUrl, options.programCache);
+  const cache = options.programCache ?? (defaultCache ??= createDefaultProgramCache());
+  const loader = new Loader(rpcUrl, cache);
+  const featuresPromise = activeFeatures(wasm, rpcUrl, cache);
 
   // Round 1: lookup tables.
   await loader.load(tx.lookups.map((l) => l.accountKey));
@@ -325,24 +480,41 @@ export async function simulateInWasm(
   if (options.tokenBalances?.length) {
     await loader.load(options.tokenBalances.map((t) => t.mint));
     for (const t of options.tokenBalances) {
-      const program = loader.accounts.get(t.mint)?.owner ?? TOKEN_PROGRAM;
-      const address = await ataAddress(t.owner, t.mint, program);
-      tokenOverrides.push({ address, mint: t.mint, owner: t.owner, amount: BigInt(t.amount), program });
+      const mint = loader.accounts.get(t.mint);
+      if (!mint) throw new Error(`mint ${t.mint} not found`);
+      const address = await ataAddress(t.owner, t.mint, mint.owner);
+      const amount =
+        t.amount !== undefined ? BigInt(t.amount) : BigInt(Math.round((t.uiAmount ?? 0) * 10 ** mint.data[44])); // Mint.decimals
+      tokenOverrides.push({ address, mint: t.mint, owner: t.owner, amount, program: mint.owner });
     }
   }
+  await loader.useCachedImmutable(keys);
 
   // Round 2, one batch so the state and the clock come from about the same slot (prop AMMs
   // reject quotes whose oracle update looks newer than the clock): every transaction account,
   // the sysvars, and override targets.
   await loader.load([...keys, ...SYSVARS, ...tokenOverrides.map((t) => t.address)]);
+  await loader.cacheImmutable(keys);
   // Round 3: program data of upgradeable programs, and mints of token accounts (for decimals).
-  const programData = keys.map((k) => programDataAddress(loader.accounts.get(k))).filter((a): a is string => !!a);
+  const programDataOf = new Map<string, string>(); // program data address -> program address
+  for (const k of keys) {
+    const pd = programDataAddress(loader.accounts.get(k));
+    if (pd) programDataOf.set(pd, k);
+  }
+  const programData = [...programDataOf.keys()];
   const mintKeys = keys
     .map((k) => loader.accounts.get(k))
     .filter((a) => a && (a.owner === TOKEN_PROGRAM || a.owner === TOKEN_2022_PROGRAM) && a.data.length >= 165)
     .map((a) => decodeAddress(a!.data.subarray(0, 32)));
-  await Promise.all([loader.loadProgramData(programData), loader.load(mintKeys)]);
+  const [feat] = await Promise.all([featuresPromise, loader.loadProgramData(programDataOf), loader.load(mintKeys)]);
   const t2 = performance.now();
+
+  // A new feature set means a new VM (program runtime environments depend on it).
+  if (!vmFeatures || !sameBytes(vmFeatures, feat.packed)) {
+    call(wasm, 'svm_reset_with_features', feat.packed);
+    vmFeatures = feat.packed;
+    vmPrograms.clear();
+  }
 
   // Apply overrides.
   const state = new Map(loader.accounts);
@@ -393,7 +565,11 @@ export async function simulateInWasm(
   for (const address of new Set(programs)) {
     const acc = state.get(address)!;
     const pd = programDataAddress(acc);
-    const version = pd ? `${pd}:${readU64(state.get(pd)?.data ?? new Uint8Array(12), 4)}` : `inline:${acc.data.length}`;
+    const version = pd
+      ? `${pd}:${readU64(state.get(pd)?.data ?? new Uint8Array(12), 4)}`
+      : acc.owner === LOADER_V4
+        ? `v4:${readU64(acc.data, 0)}` // LoaderV4State.slot
+        : `immutable:${acc.data.length}`;
     if (vmPrograms.get(address) === version && !options.overrides?.[address]) continue;
     setAccount(wasm, address, acc);
     vmPrograms.set(address, version);
@@ -443,5 +619,7 @@ export async function simulateInWasm(
     timings: { loadWasmMs: t1 - t0, fetchMs: t2 - t1, setAccountsMs: t3 - t2, simulateMs: t4 - t3 },
     fetchedBytes: loader.fetchedBytes,
     accountCount: keys.length,
+    memoryBytes: wasm.memory.buffer.byteLength,
+    activeFeatures: feat.count,
   };
 }

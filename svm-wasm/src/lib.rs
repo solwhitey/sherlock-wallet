@@ -7,7 +7,11 @@
 //!
 //! Exports (all integers are i64 on wasm64 because usize is 64-bit):
 //!   svm_alloc(len) -> ptr            svm_free(ptr, len)
-//!   svm_reset()                      fresh VM (mainnet features, builtins, sysvars)
+//!   svm_reset()                      fresh VM (LiteSVM's mainnet feature snapshot)
+//!   svm_feature_ids()                JSON array of every feature id this runtime knows
+//!   svm_reset_with_features(ptr, len) fresh VM with exactly these active features
+//!                                    (packed: id[32] activation_slot:u64le, repeated)
+//!   svm_drop()                       free the VM (linear memory stays allocated)
 //!   svm_set_account(ptr, len) -> i32 packed account, see `set_account`
 //!   svm_set_clock(slot, epoch_start_ts, epoch, leader_epoch, unix_ts)
 //!   svm_simulate(ptr, len) -> i32    bincode VersionedTransaction; JSON result
@@ -15,6 +19,7 @@
 
 use {
     base64::Engine,
+    agave_feature_set::FeatureSet,
     litesvm::LiteSVM,
     serde_json::{json, Value},
     solana_account::Account,
@@ -32,11 +37,15 @@ thread_local! {
 }
 
 fn new_vm() -> LiteSVM {
+    vm_with_features(LiteSVM::mainnet_feature_set())
+}
+
+fn vm_with_features(features: FeatureSet) -> LiteSVM {
     // Like LiteSVM::new() minus the bundled SPL program ELFs (we load the real
     // mainnet programs from the RPC instead) and with sigverify/blockhash
     // checks off, as for RPC simulateTransaction with sigVerify=false.
     LiteSVM::default()
-        .with_mainnet_features()
+        .with_feature_set(features)
         .with_builtins()
         .with_sysvars()
         .with_feature_accounts()
@@ -44,6 +53,7 @@ fn new_vm() -> LiteSVM {
         .with_blockhash_check(false)
         .with_transaction_history(0)
         .with_log_bytes_limit(Some(10_000)) // same truncation as Agave RPC
+        .with_precompiles() // ed25519, secp256k1, secp256r1 (vendored, no OpenSSL)
 }
 
 fn with_vm<R>(f: impl FnOnce(&mut LiteSVM) -> R) -> R {
@@ -93,6 +103,41 @@ pub extern "C" fn svm_out_len() -> usize {
 #[no_mangle]
 pub extern "C" fn svm_reset() {
     VM.with(|vm| *vm.borrow_mut() = Some(new_vm()));
+}
+
+#[no_mangle]
+pub extern "C" fn svm_drop() {
+    VM.with(|vm| *vm.borrow_mut() = None);
+    OUT.with(|o| *o.borrow_mut() = Vec::new());
+}
+
+/// Writes the JSON array of every feature id known to this runtime to the out buffer.
+#[no_mangle]
+pub extern "C" fn svm_feature_ids() {
+    let fs = FeatureSet::default();
+    let ids: Vec<String> = fs
+        .inactive()
+        .iter()
+        .chain(fs.active().keys())
+        .map(|id| id.to_string())
+        .collect();
+    set_out(&json!(ids));
+}
+
+/// Replaces the VM with one whose active features are exactly the given ones
+/// (read from the chain's feature accounts by the host).
+///
+/// # Safety
+/// `ptr` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn svm_reset_with_features(ptr: *const u8, len: usize) {
+    let buf = std::slice::from_raw_parts(ptr, len);
+    let mut fs = FeatureSet::default();
+    for chunk in buf.chunks_exact(40) {
+        let id = Address::new_from_array(chunk[..32].try_into().unwrap());
+        fs.activate(&id, u64::from_le_bytes(chunk[32..].try_into().unwrap()));
+    }
+    VM.with(|vm| *vm.borrow_mut() = Some(vm_with_features(fs)));
 }
 
 #[no_mangle]

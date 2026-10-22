@@ -18,6 +18,3 @@ out
 
 dist.crx
 dist.pem
-
-# built by svm-wasm/build.sh
-src/sim/svm.wasm
