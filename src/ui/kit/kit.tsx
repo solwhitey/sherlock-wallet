@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import React, { FC, ReactNode, useLayoutEffect, useRef, useState } from 'react';
+import React, { FC, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CheckIcon, ChevronDown, CopyIcon } from './icons';
 
 // ---- Buttons -------------------------------------------------------------------------------
@@ -310,11 +310,27 @@ export const LetterAvatar: FC<{ text: string; size?: number }> = ({ text, size =
   </span>
 );
 
-export const TokenIcon: FC<{ src?: string; size?: number; className?: string }> = ({ src, size = 28, className }) =>
-  src ? (
+// Many token icons live on IPFS behind gateways that died or rate-limit (nftstorage.link now
+// redirects to dweb.link, which answers 429), so IPFS images are tried on gateways that serve them.
+const IPFS_GATEWAYS = ['https://ipfs.filebase.io/ipfs/', 'https://gateway.pinata.cloud/ipfs/'];
+
+function iconSources(src: string): string[] {
+  const match =
+    src.match(/^https?:\/\/([a-z0-9]{46,})\.ipfs\.[^/]+\/?(.*)$/i) ?? src.match(/\/ipfs\/([a-z0-9]{46,})\/?(.*)$/i);
+  if (!match) return [src];
+  const path = match[2] ? `/${match[2]}` : '';
+  return [...IPFS_GATEWAYS.map((g) => `${g}${match[1]}${path}`), src];
+}
+
+export const TokenIcon: FC<{ src?: string; size?: number; className?: string }> = ({ src, size = 28, className }) => {
+  const sources = useMemo(() => (src ? iconSources(src) : []), [src]);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => setAttempt(0), [src]);
+  return attempt < sources.length ? (
     <img
-      src={src}
+      src={sources[attempt]}
       alt=""
+      onError={() => setAttempt((a) => a + 1)}
       className={clsx('shrink-0 rounded-full bg-tint object-cover', className)}
       style={{ width: size, height: size }}
     />
@@ -324,6 +340,7 @@ export const TokenIcon: FC<{ src?: string; size?: number; className?: string }> 
       style={{ width: size, height: size }}
     />
   );
+};
 
 // ---- Rows -----------------------------------------------------------------------------------
 
