@@ -1,5 +1,5 @@
 const SIZES: Record<string, { width: number; height: number }> = {
-  default: { width: 420, height: 600 },
+  default: { width: 420, height: 640 },
   inspect: { width: 560, height: 860 },
 };
 

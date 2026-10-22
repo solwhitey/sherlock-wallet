@@ -90,8 +90,8 @@ chrome.runtime.onConnect.addListener((port) => {
     const transport = createPortTransport(port);
     const rpc = createRPC(transport);
 
-    rpc.exposeMethod('connect', async () => {
-      const { closePopup, popupClosed, tabId } = await openPopup('approveConnection');
+    rpc.exposeMethod('connect', async ([{ origin } = {} as { origin?: string }]) => {
+      const { closePopup, popupClosed, tabId } = await openPopup('approveConnection', origin ? { origin } : {});
       if (tabId === undefined) throw new Error('approval window has no tab');
 
       const approval = await popupRPC(tabId).get();

@@ -159,7 +159,7 @@ export class SherlockWallet implements Wallet {
   }
 
   #connect: StandardConnectMethod = async () => {
-    const accounts = (await this.#rpc.callMethod('connect')) as { publicKey: Uint8Array }[];
+    const accounts = (await this.#rpc.callMethod('connect', [{ origin: window.location.origin }])) as { publicKey: Uint8Array }[];
 
     if (accounts === null) {
       throw new Error(REJECTED);

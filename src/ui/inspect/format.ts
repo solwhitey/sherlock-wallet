@@ -57,7 +57,7 @@ export function iconOf(mint: string, tokens: Record<string, TokenInfo>) {
 export const lamportsToSol = (lamports: bigint) => formatAmount(lamports, 9, { maxFraction: 6 });
 
 export const toneOf = (value: number | bigint | undefined) =>
-  value === undefined ? '' : value > 0 ? 'text-emerald-400' : value < 0 ? 'text-rose-400' : 'text-slate-300';
+  value === undefined ? '' : value > 0 ? 'text-pos' : value < 0 ? 'text-neg' : 'text-ink-2';
 
 export function timeAgo(ms: number) {
   const s = Math.round((Date.now() - ms) / 1000);

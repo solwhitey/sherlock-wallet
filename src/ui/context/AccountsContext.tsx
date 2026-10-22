@@ -33,14 +33,17 @@ export const AccountsProvider: FC<{ children: NonNullable<ReactNode> }> = ({ chi
     setAccounts(accounts);
   }, []);
 
-  const addAccount = useCallback(async (account: SerializedAccount) => {
-    if (accounts.some((acc) => acc.address.toBase58() === account.address)) {
-      return;
-    }
+  const addAccount = useCallback(
+    async (account: SerializedAccount) => {
+      if (accounts.some((acc) => acc.address.toBase58() === account.address)) {
+        return;
+      }
 
-    await rpc.callMethod('addAccount', [account]);
-    updateAccounts();
-  }, [accounts]);
+      await rpc.callMethod('addAccount', [account]);
+      updateAccounts();
+    },
+    [accounts]
+  );
 
   const removeAccount = useCallback(async (account: SerializedAccount) => {
     await rpc.callMethod('removeAccount', [account]);
