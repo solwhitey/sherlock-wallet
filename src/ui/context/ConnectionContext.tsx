@@ -1,8 +1,10 @@
 import React, { FC, ReactNode } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 
+export const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+
 export const RPC_PRESETS = [
-  { label: 'Solana mainnet (public)', url: 'https://api.mainnet-beta.solana.com' },
+  { label: 'Solana mainnet (public)', url: PUBLIC_RPC },
   { label: 'Surfpool (local fork)', url: 'http://127.0.0.1:8899' },
   { label: 'Solana devnet', url: 'https://api.devnet.solana.com' },
 ];

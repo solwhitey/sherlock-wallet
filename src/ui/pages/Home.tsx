@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { ICON } from '../../content/Icon';
 import { AccountList, AddAccountForm } from '../components/Accounts';
 import { PasteTransaction, RequestHistory } from '../components/InspectTools';
+import { RpcSetupCard } from '../components/RpcSetup';
 import { RPC_PRESETS, useConnection } from '../context/ConnectionContext';
 import { useAccounts } from '../hooks/useAccounts';
 import { shortAddress } from '../inspect/format';
@@ -213,6 +214,7 @@ export const Home: FC = () => {
         </IconButton>
       </header>
       <div className="space-y-7 px-5 pb-6 pt-3">
+        <RpcSetupCard />
         <ViewingAs />
         <Block title="Addresses">
           <AccountList editable onAdd={() => setView('add')} />
