@@ -390,7 +390,7 @@ export const SwapSection: FC<{
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint">
                   <div className="h-full rounded-full bg-ink" style={{ width: `${Math.min(100, step.pct)}%` }} />
                 </div>
-                <span className="w-10 shrink-0 text-right text-ink-2">{step.pct}%</span>
+                <span className="w-14 shrink-0 text-right text-ink-2">{Number(step.pct.toFixed(1))}%</span>
               </div>
             ))}
           </div>

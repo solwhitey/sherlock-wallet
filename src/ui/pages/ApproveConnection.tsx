@@ -56,7 +56,7 @@ export const ApproveConnection: FC = () => {
           </div>
         </div>
         <h1 className="mt-6 text-[26px] font-bold leading-tight tracking-tight">Who do you want to be?</h1>
-        <p className="mt-1 text-sm text-ink-2">The dapp sees this address. Sherlock never signs anything.</p>
+        <p className="mt-1 text-sm text-ink-2">Tap an address to connect as it. Sherlock never signs anything.</p>
 
         <div className="-mx-3 mt-5">
           {accounts.map((account) => (
@@ -64,7 +64,11 @@ export const ApproveConnection: FC = () => {
               key={account.address.toBase58()}
               account={account}
               selected={account.address.toBase58() === connectedAddress}
-              onSelect={() => changeConnectedAccount(account)}
+              onSelect={() => {
+                // One tap: become this address and connect.
+                changeConnectedAccount(account);
+                approveConnection?.([account]);
+              }}
             />
           ))}
         </div>

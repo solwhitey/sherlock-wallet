@@ -32,6 +32,6 @@
       }
     }
   },
-  "permissions": ["alarms", "storage"],
+  "permissions": ["storage"],
   "host_permissions": ["https://lite-api.jup.ag/*", "http://127.0.0.1/*", "http://localhost/*"]
 }

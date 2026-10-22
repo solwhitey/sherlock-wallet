@@ -6,6 +6,10 @@ import { AppContext } from './context';
 import { ApproveConnection } from './pages/ApproveConnection';
 import { Home } from './pages/Home';
 import { Inspect } from './pages/Inspect';
+import { applyTheme, followThemeChanges } from './theme';
+
+applyTheme();
+followThemeChanges();
 
 const Root: FC = () => {
   const queryParams = new URLSearchParams(window.location.search);

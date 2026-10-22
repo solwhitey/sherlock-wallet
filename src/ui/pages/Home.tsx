@@ -7,8 +7,9 @@ import { RPC_PRESETS, useConnection } from '../context/ConnectionContext';
 import { useAccounts } from '../hooks/useAccounts';
 import { shortAddress } from '../inspect/format';
 import { CheckIcon, ChevronLeft, SettingsIcon } from '../kit/icons';
-import { AddressAvatar, Button, CopyButton, IconButton, Row } from '../kit/kit';
+import { AddressAvatar, Button, CopyButton, IconButton, Row, Segmented } from '../kit/kit';
 import { rpc } from '../rpc';
+import { getTheme, setTheme, ThemeChoice } from '../theme';
 
 type View = 'home' | 'add' | 'settings';
 
@@ -34,7 +35,7 @@ const ViewingAs: FC = () => {
   }
   const address = current.address.toBase58();
   return (
-    <div className="rounded-card px-5 py-5 shadow-float">
+    <div className="rounded-card bg-raised px-5 py-5 shadow-float">
       <div className="caps">Viewing dapps as</div>
       <div className="mt-3 flex items-center gap-3">
         <AddressAvatar address={address} size={48} />
@@ -52,10 +53,28 @@ const Settings: FC<{ onBack: () => void }> = ({ onBack }) => {
   const { rpcUrl, setRPCUrl } = useConnection();
   const [custom, setCustom] = useState(RPC_PRESETS.some((p) => p.url === rpcUrl) ? '' : rpcUrl);
   const [cleared, setCleared] = useState(false);
+  const [theme, setThemeState] = useState<ThemeChoice>(getTheme);
   return (
     <>
       <SubpageHeader title="Settings" onBack={onBack} />
       <div className="space-y-7 px-5 py-5">
+        <div>
+          <h2 className="text-lg font-semibold">Appearance</h2>
+          <p className="mb-3 text-xs text-ink-2">Auto follows your system's light or dark mode.</p>
+          <Segmented<ThemeChoice>
+            value={theme}
+            onChange={(t) => {
+              setTheme(t);
+              setThemeState(t);
+            }}
+            items={[
+              { id: 'auto', label: 'Auto' },
+              { id: 'light', label: 'Light' },
+              { id: 'dark', label: 'Dark' },
+            ]}
+          />
+        </div>
+
         <div>
           <h2 className="text-lg font-semibold">Simulation RPC</h2>
           <p className="mb-2 text-xs text-ink-2">

@@ -1,7 +1,7 @@
 import type { RPC } from '../messages';
 import { CONTENT_PORT_NAME, createPortTransport, createRPC, POPUP_PORT_NAME } from '../messages';
 import { asyncState } from '../utils/asyncState';
-import { openPopup } from '../utils/popup';
+import { openPopup, PopupHandle, trackPopup } from '../utils/popup';
 import { clearHistory, getHistory, getRequest, saveRequest } from './requests';
 import { addAccount, getAccounts, removeAccount } from './storage';
 
@@ -15,33 +15,84 @@ const popupRPC = (tabId: number) => {
 };
 const contentRPCs = new Set<RPC>();
 
-let connectedAccounts: { publicKey: Uint8Array }[] | undefined;
-
 const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
     addAccount({ label: 'Coinbase 2', address: '2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm' });
   }
-  // Keep the service worker alive while dapps hold pending requests.
-  chrome.alarms.get('keep-alive', (a) => {
-    if (!a) chrome.alarms.create('keep-alive', { periodInMinutes: 0.5 });
+});
+
+// ---- Surviving service worker restarts --------------------------------------------------------
+// Chrome stops an idle worker after ~30 s, which used to drop a dapp's pending request while its
+// window was still open. Calling an extension API resets the idle timer, so do that while any
+// request is pending; and should the worker restart anyway, the content script replays the
+// request and the window recorded below is reused instead of opening a second one.
+
+let pending = 0;
+let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
+
+async function keepAlive<T>(work: () => Promise<T>): Promise<T> {
+  pending++;
+  keepAliveTimer ??= setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
+  try {
+    return await work();
+  } finally {
+    if (--pending === 0 && keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = undefined;
+    }
+  }
+}
+
+const windowKey = (key: string) => `window:${key}`;
+
+// Opens the window for a dapp request, or finds the one already open for it (same request key,
+// replayed after a restart).
+async function requestWindow(key: string | undefined, open: () => Promise<PopupHandle>): Promise<PopupHandle> {
+  if (key) {
+    const stored = (await chrome.storage.session.get(windowKey(key)))[windowKey(key)] as number | undefined;
+    if (stored !== undefined) {
+      try {
+        await chrome.tabs.get(stored);
+        return trackPopup(stored);
+      } catch {
+        // The window is gone: open a new one.
+      }
+    }
+  }
+  const handle = await open();
+  if (key && handle.tabId !== undefined) await chrome.storage.session.set({ [windowKey(key)]: handle.tabId });
+  return handle;
+}
+
+const forgetWindow = (key?: string) => (key ? chrome.storage.session.remove(windowKey(key)) : Promise.resolve());
+
+type StoredAccount = { publicKey: number[] };
+
+async function getConnectedAccounts() {
+  const { connectedAccounts } = await chrome.storage.session.get('connectedAccounts');
+  return (connectedAccounts as StoredAccount[] | undefined)?.map((a) => ({ publicKey: Uint8Array.from(a.publicKey) }));
+}
+
+async function setConnectedAccounts(accounts: { publicKey: Uint8Array }[] | null | undefined) {
+  if (!accounts) return;
+  await chrome.storage.session.set({
+    connectedAccounts: accounts.map((a) => ({ publicKey: Array.from(a.publicKey) })),
   });
-});
+}
 
-// Add a noop listener to the alarm. Without this, the service worker seems
-// to be deemed as idle by Chrome and will be killed after 30s.
-chrome.alarms.onAlarm.addListener(() => {
-  // Noop
-  Function.prototype();
-});
-
-async function inspect(request: Parameters<typeof saveRequest>[0]) {
-  const saved = await saveRequest(request);
-  const { popupClosed } = await openPopup('inspect', { request: saved.id });
-  await popupClosed;
-  // Sherlock never signs: closing the inspector always rejects.
-  return null;
+async function inspect(key: string | undefined, request: Parameters<typeof saveRequest>[0]) {
+  return keepAlive(async () => {
+    const { popupClosed } = await requestWindow(key, async () => {
+      const saved = await saveRequest(request);
+      return openPopup('inspect', { request: saved.id });
+    });
+    await popupClosed;
+    await forgetWindow(key);
+    // Sherlock never signs: closing the inspector always rejects.
+    return null;
+  });
 }
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -59,11 +110,10 @@ chrome.runtime.onConnect.addListener((port) => {
       await removeAccount(account);
     });
     rpc.exposeMethod('changeAccounts', async (params) => {
+      await setConnectedAccounts(params);
       for (const content of contentRPCs) content.callMethod('changeAccounts', params);
     });
-    rpc.exposeMethod('connectedAccounts', async () => {
-      return connectedAccounts;
-    });
+    rpc.exposeMethod('connectedAccounts', getConnectedAccounts);
 
     rpc.exposeMethod('getRequest', async ([id]) => (await getRequest(id)) ?? null);
     rpc.exposeMethod('getHistory', getHistory);
@@ -90,23 +140,26 @@ chrome.runtime.onConnect.addListener((port) => {
     const transport = createPortTransport(port);
     const rpc = createRPC(transport);
 
-    rpc.exposeMethod('connect', async ([{ origin } = {} as { origin?: string }]) => {
-      const { closePopup, popupClosed, tabId } = await openPopup('approveConnection', origin ? { origin } : {});
-      if (tabId === undefined) throw new Error('approval window has no tab');
+    rpc.exposeMethod('connect', async ([{ origin, key } = {} as { origin?: string; key?: string }]) =>
+      keepAlive(async () => {
+        const { closePopup, popupClosed, tabId } = await requestWindow(key, () =>
+          openPopup('approveConnection', origin ? { origin } : {})
+        );
+        if (tabId === undefined) throw new Error('approval window has no tab');
 
-      const approval = await popupRPC(tabId).get();
-      const connectResult = approval.callMethod('connect');
+        // A reused window reconnects its port after a restart; wait for it (or for it to close).
+        const approval = await Promise.race([popupRPC(tabId).get(), popupClosed]);
+        const response = approval ? await Promise.race([approval.callMethod('connect'), popupClosed]) : null;
 
-      const response = await Promise.race([connectResult, popupClosed]);
+        await setConnectedAccounts(response);
+        await forgetWindow(key);
+        closePopup();
+        return response;
+      })
+    );
 
-      connectedAccounts = response;
-      closePopup();
-
-      return response;
-    });
-
-    rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, origin }]) =>
-      inspect({
+    rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, origin, key }]) =>
+      inspect(key, {
         kind: 'transactions',
         method,
         address,
@@ -116,8 +169,8 @@ chrome.runtime.onConnect.addListener((port) => {
       })
     );
 
-    rpc.exposeMethod('inspectMessage', async ([{ address, message, origin }]) =>
-      inspect({ kind: 'message', method: 'signMessage', address, origin, message: toBase64(message) })
+    rpc.exposeMethod('inspectMessage', async ([{ address, message, origin, key }]) =>
+      inspect(key, { kind: 'message', method: 'signMessage', address, origin, message: toBase64(message) })
     );
 
     port.onDisconnect.addListener(() => {

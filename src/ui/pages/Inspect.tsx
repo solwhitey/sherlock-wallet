@@ -312,7 +312,7 @@ export const Inspect: FC = () => {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas/95 px-4 py-3 backdrop-blur">
+      <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-line bg-canvas px-4 py-3 ">
         <IconButton label={request?.method === 'paste' ? 'Close' : 'Reject and close'} onClick={() => window.close()}>
           <XIcon size={18} />
         </IconButton>
@@ -360,7 +360,7 @@ export const Inspect: FC = () => {
         ) : null}
       </main>
 
-      <footer className="sticky bottom-0 border-t border-line bg-canvas/95 px-6 py-4 backdrop-blur">
+      <footer className="sticky bottom-0 border-t border-line bg-canvas px-6 py-4 ">
         <Button kind="dark" size="lg" className="w-full" onClick={() => window.close()}>
           {request?.method === 'paste' ? 'Done' : 'Reject and close'}
         </Button>

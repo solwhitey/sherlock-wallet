@@ -40,19 +40,21 @@ async function createPopup(page?: string, params: Record<string, string> = {}): 
   return popup;
 }
 
-export async function openPopup(page?: string, params?: Record<string, string>) {
-  const popup = await createPopup(page, params);
+export type PopupHandle = { closePopup: () => Promise<void>; popupClosed: Promise<null>; tabId?: number };
 
+// Follows a request window by its tab rather than its window: some environments (headless Chrome,
+// window managers that merge popups) put it in a window shared with other tabs.
+export function trackPopup(tabId: number | undefined, windowId?: number): PopupHandle {
   let isOpen = true;
-  // Track the popup's tab rather than its window: some environments (headless Chrome, window
-  // managers that merge popups) put it in a window shared with other tabs.
-  const tabId = popup.tabs?.[0]?.id;
 
   const closePopup = async () => {
     if (!isOpen) return;
-    if (tabId !== undefined) await chrome.tabs.remove(tabId);
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    else await chrome.windows.remove(popup.id!);
+    try {
+      if (tabId !== undefined) await chrome.tabs.remove(tabId);
+      else if (windowId !== undefined) await chrome.windows.remove(windowId);
+    } catch {
+      // Already gone.
+    }
   };
 
   const popupClosed: Promise<null> = new Promise((resolve) => {
@@ -63,10 +65,15 @@ export async function openPopup(page?: string, params?: Record<string, string>) 
       resolve(null);
     };
     const handleTabRemoved = (id: number) => id === tabId && done();
-    const handleWindowRemoved = (id: number) => id === popup.id && done();
+    const handleWindowRemoved = (id: number) => id === windowId && done();
     chrome.tabs.onRemoved.addListener(handleTabRemoved);
     chrome.windows.onRemoved.addListener(handleWindowRemoved);
   });
 
   return { closePopup, popupClosed, tabId };
+}
+
+export async function openPopup(page?: string, params?: Record<string, string>): Promise<PopupHandle> {
+  const popup = await createPopup(page, params);
+  return trackPopup(popup.tabs?.[0]?.id, popup.id);
 }

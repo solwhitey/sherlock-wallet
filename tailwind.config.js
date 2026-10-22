@@ -7,6 +7,7 @@ module.exports = {
     extend: {
       colors: {
         canvas: 'var(--canvas)',
+        raised: 'var(--raised)',
         ink: { DEFAULT: 'var(--ink)', 2: 'var(--ink-2)', 3: 'var(--ink-3)' },
         line: { DEFAULT: 'var(--line)', strong: 'var(--line-strong)' },
         hover: 'var(--hover)',

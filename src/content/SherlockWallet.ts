@@ -64,6 +64,9 @@ const FEATURES = [
 
 const REJECTED = 'The user rejected the request.';
 
+// Identifies one dapp request across service worker restarts (see the content script).
+const requestKey = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+
 let instance = 0;
 
 export class SherlockWallet implements Wallet {
@@ -159,7 +162,9 @@ export class SherlockWallet implements Wallet {
   }
 
   #connect: StandardConnectMethod = async () => {
-    const accounts = (await this.#rpc.callMethod('connect', [{ origin: window.location.origin }])) as { publicKey: Uint8Array }[];
+    const accounts = (await this.#rpc.callMethod('connect', [
+      { origin: window.location.origin, key: requestKey() },
+    ])) as { publicKey: Uint8Array }[];
 
     if (accounts === null) {
       throw new Error(REJECTED);
@@ -193,6 +198,7 @@ export class SherlockWallet implements Wallet {
         address: inputs[0].account.address,
         chain: inputs[0].chain,
         origin: window.location.origin,
+        key: requestKey(),
         transactions: inputs.map((i) => i.transaction),
       },
     ]);
@@ -211,7 +217,7 @@ export class SherlockWallet implements Wallet {
   #signMessage: SolanaSignMessageMethod = async (...inputs) => {
     const [{ account, message }] = inputs;
     await this.#rpc.callMethod('inspectMessage', [
-      { address: account.address, message, origin: window.location.origin },
+      { address: account.address, message, origin: window.location.origin, key: requestKey() },
     ]);
     throw new Error(REJECTED);
   };
