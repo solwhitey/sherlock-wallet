@@ -6,6 +6,7 @@ import { AppContext } from './context';
 import { ApproveConnection } from './pages/ApproveConnection';
 import { Home } from './pages/Home';
 import { Inspect } from './pages/Inspect';
+import { Wallet } from './pages/Wallet';
 import { applyTheme, followThemeChanges } from './theme';
 
 applyTheme();
@@ -19,6 +20,7 @@ const Root: FC = () => {
     ? {
         approveConnection: ApproveConnection,
         inspect: Inspect,
+        wallet: Wallet,
       }[page]!
     : Home;
   // Request windows fill their window; the toolbar popup is a fixed 400px column.

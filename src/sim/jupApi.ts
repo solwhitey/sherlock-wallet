@@ -5,7 +5,7 @@ import { cacheGet, cacheSet } from './cache';
 export const JUP_API = 'https://api.jup.ag';
 export const JUP_KEY_STORAGE = 'Sherlock-jup-key';
 
-function apiKey(): string | undefined {
+export function apiKey(): string | undefined {
   try {
     const stored = globalThis.localStorage?.getItem(JUP_KEY_STORAGE);
     if (stored) return JSON.parse(stored) || undefined;
@@ -25,7 +25,7 @@ export type TokenInfo = {
   verified?: boolean;
 };
 
-async function getJson(url: string) {
+export async function getJson(url: string) {
   const key = apiKey();
   const response = await fetch(url, key ? { headers: { 'x-api-key': key } } : undefined);
   if (response.status === 429) throw new Error('Jupiter rate limit hit, try again in a minute');

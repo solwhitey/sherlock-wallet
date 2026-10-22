@@ -48,6 +48,9 @@ const ViewingAs: FC = () => {
         </div>
         <CopyButton text={address} label="Copy address" />
       </div>
+      <Button kind="soft" size="sm" className="mt-4 w-full" onClick={() => rpc.callMethod('openWallet', [address])}>
+        Positions and activity
+      </Button>
     </div>
   );
 };

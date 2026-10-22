@@ -145,6 +145,9 @@ chrome.runtime.onConnect.addListener((port) => {
     rpc.exposeMethod('openRequest', async ([id]) => {
       await openPopup('inspect', { request: id });
     });
+    rpc.exposeMethod('openWallet', async ([address]) => {
+      await openPopup('wallet', { address });
+    });
 
     const tabId = port.sender?.tab?.id;
     port.onDisconnect.addListener(() => {
