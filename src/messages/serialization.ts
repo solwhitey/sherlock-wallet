@@ -1,4 +1,3 @@
-
 function serializeMessage(message: Uint8Array): string {
   return Buffer.from(message).toString('base64');
 }

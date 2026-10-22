@@ -6,6 +6,7 @@ import {
   transactionConfigMaskHasLoadedAccountsDataSizeLimit,
   transactionConfigMaskHasPriorityFee,
 } from '@solana/kit';
+import bs58 from 'bs58';
 import type { TxVersion } from './programs';
 
 // One shape for every transaction format (legacy, v0 and v1, decoded by @solana/kit), so the
@@ -140,4 +141,33 @@ function findDataOffset(bytes: Uint8Array, data: Uint8Array): number | undefined
     return i;
   }
   return undefined;
+}
+
+const EXPLORER_INSPECTOR = 'https://explorer.solana.com/tx/inspector';
+
+// Explorer's inspector reads every format (v1 included) from the message bytes plus signatures.
+export function explorerInspectorUrl(bytes: Uint8Array): string | undefined {
+  try {
+    const { messageBytes, signatures } = getTransactionDecoder().decode(bytes);
+    const url = new URL(EXPLORER_INSPECTOR);
+    const sigs = Object.values(signatures).map((sig) => bs58.encode(sig ?? new Uint8Array(64)));
+    url.searchParams.append('signatures', JSON.stringify(sigs));
+    url.searchParams.append('message', Buffer.from(messageBytes).toString('base64'));
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+// Which required signatures are present (non-zero) in the serialized transaction.
+export function signatureSlots(bytes: Uint8Array): { signer: string; present: boolean; signature?: string }[] {
+  try {
+    const { signatures } = getTransactionDecoder().decode(bytes);
+    return Object.entries(signatures).map(([signer, sig]) => {
+      const present = !!sig && sig.some((b) => b !== 0);
+      return { signer, present, signature: present ? bs58.encode(sig!) : undefined };
+    });
+  } catch {
+    return [];
+  }
 }

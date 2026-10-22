@@ -49,6 +49,8 @@ function system(data: Uint8Array): DecodedInstruction | undefined {
       return { name: 'Transfer', args: { lamports: r.u64() }, accountNames: ['from', 'to'] };
     case 3:
       return { name: 'CreateAccountWithSeed', accountNames: ['funder', 'newAccount', 'base'] };
+    case 4:
+      return { name: 'AdvanceNonceAccount', accountNames: ['nonceAccount', 'recentBlockhashes', 'nonceAuthority'] };
     case 8:
       return { name: 'Allocate', args: { space: r.u64() }, accountNames: ['account'] };
   }
@@ -65,6 +67,15 @@ function token(data: Uint8Array): DecodedInstruction | undefined {
       return { name: 'Approve', args: { amount: r.u64() }, accountNames: ['source', 'delegate', 'owner'] };
     case 5:
       return { name: 'Revoke', accountNames: ['source', 'owner'] };
+    case 6: {
+      const authorityType = ['MintTokens', 'FreezeAccount', 'AccountOwner', 'CloseAccount'][r.u8()] ?? 'Other';
+      const newAuthority = r.u8() ? r.pubkey() : null;
+      return {
+        name: 'SetAuthority',
+        args: { authorityType, newAuthority },
+        accountNames: ['account', 'currentAuthority'],
+      };
+    }
     case 7:
       return { name: 'MintTo', args: { amount: r.u64() }, accountNames: ['mint', 'account', 'authority'] };
     case 8:
@@ -76,6 +87,12 @@ function token(data: Uint8Array): DecodedInstruction | undefined {
         name: 'TransferChecked',
         args: { amount: r.u64(), decimals: r.u8() },
         accountNames: ['source', 'mint', 'destination', 'authority'],
+      };
+    case 13:
+      return {
+        name: 'ApproveChecked',
+        args: { amount: r.u64(), decimals: r.u8() },
+        accountNames: ['source', 'mint', 'delegate', 'owner'],
       };
     case 17:
       return { name: 'SyncNative', accountNames: ['account'] };

@@ -1,46 +1,37 @@
-import { VersionedTransaction } from '@solana/web3.js';
-import base58 from 'bs58';
 import type { FC } from 'react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { InspectRequest } from '../../background/requests';
-import { analyze, Analysis } from '../../sim/analyze';
+import { analyze, Analysis, Execution } from '../../sim/analyze';
+import { fetchLanded } from '../../sim/replay';
+import { supportReport } from '../../sim/report';
 import { getQuote } from '../../sim/jupApi';
+import { explorerInspectorUrl, parseTransaction } from '../../sim/tx';
 import { useConnection } from '../context/ConnectionContext';
 import { useAccounts } from '../hooks/useAccounts';
-import { AddressLink, InstructionsTab, LogsTab, RawTab } from '../inspect/Details';
+import { AccountsTab, AddressLink, InstructionsTab, LogsTab, RawTab } from '../inspect/Details';
 import { jsonReplacer, shortAddress, timeAgo } from '../inspect/format';
 import {
   BalanceCard,
   ChecksSection,
+  ComputeSection,
   ErrorBanner,
   ExecutionCard,
   FeesSection,
   OthersSection,
   QuoteState,
   RouteSection,
+  RoutersSection,
   SeriesPoint,
 } from '../inspect/Summary';
-import { RefreshIcon, XIcon } from '../kit/icons';
+import { CheckIcon, CopyIcon, RefreshIcon, XIcon } from '../kit/icons';
 import { AddressAvatar, Button, Dot, IconButton, Pill, Segmented, Switch } from '../kit/kit';
 import { rpc } from '../rpc';
+import { BundleView } from '../inspect/Bundle';
 
-const EXPLORER_INSPECT_BASE_URL = 'https://explorer.solana.com/tx/inspector';
 const RESIMULATE_MS = 5_000;
 const SERIES_LIMIT = 120;
 
 const fromBase64 = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-function explorerUrl(bytes: Uint8Array) {
-  try {
-    const tx = VersionedTransaction.deserialize(bytes);
-    const url = new URL(EXPLORER_INSPECT_BASE_URL);
-    url.searchParams.append('signatures', JSON.stringify(tx.signatures.map((sig) => base58.encode(sig))));
-    url.searchParams.append('message', Buffer.from(tx.message.serialize()).toString('base64'));
-    return url.toString();
-  } catch {
-    return undefined;
-  }
-}
 
 function download(name: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
@@ -51,7 +42,21 @@ function download(name: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
-type TabId = 'summary' | 'instructions' | 'logs' | 'raw';
+type TabId = 'summary' | 'instructions' | 'accounts' | 'logs' | 'raw';
+type DetailId = 'instructions' | 'accounts' | 'compute' | 'logs' | 'raw';
+
+// Wide windows get a two-column, desktop-style layout: summary on the left, explorer-level detail
+// on the right.
+const WIDE = 1100;
+function useWide() {
+  const [wide, setWide] = useState(() => window.innerWidth >= WIDE);
+  useEffect(() => {
+    const onResize = () => setWide(window.innerWidth >= WIDE);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return wide;
+}
 
 const Skeleton: FC = () => (
   <div className="animate-pulse space-y-4 pt-2">
@@ -68,7 +73,11 @@ const TxInspector: FC<{
   active: boolean;
   live: boolean;
   setLive: (v: boolean) => void;
-}> = ({ request, index, active, live, setLive }) => {
+  // For replays: what happened on chain, shown next to a fresh simulation of the same bytes.
+  landed?: Execution;
+  // Reports the active transaction's latest analysis, for the footer's report button.
+  onAnalysis?: (a: Analysis, base64: string) => void;
+}> = ({ request, index, active, live, setLive, landed, onAnalysis }) => {
   const { rpcUrl } = useConnection();
   const { accounts } = useAccounts();
   const base64 = request.transactions![index];
@@ -82,9 +91,21 @@ const TxInspector: FC<{
   const [error, setError] = useState<string>();
   const [running, setRunning] = useState(false);
   const [tab, setTab] = useState<TabId>('summary');
+  const [detailTab, setDetailTab] = useState<DetailId>('instructions');
+  const wide = useWide();
+  const [mode, setMode] = useState<'landed' | 'now'>(landed ? 'landed' : 'now');
+  // A replay is viewed from its fee payer unless the chosen address signed it.
+  const user = useMemo(() => {
+    if (!landed) return request.address;
+    const tx = parseTransaction(bytes);
+    const signers = tx?.staticKeys.slice(0, tx.header.numRequiredSignatures) ?? [];
+    return signers.includes(request.address) ? request.address : undefined;
+  }, [landed, bytes, request.address]);
   const [series, setSeries] = useState<Record<string, SeriesPoint[]>>({});
   const [quotes, setQuotes] = useState<Record<string, QuoteState>>({});
   const inFlight = useRef(false);
+  const onAnalysisRef = useRef(onAnalysis);
+  onAnalysisRef.current = active ? onAnalysis : undefined;
   const quotesRef = useRef(quotes);
   quotesRef.current = quotes;
 
@@ -112,9 +133,16 @@ const TxInspector: FC<{
     inFlight.current = true;
     setRunning(true);
     try {
-      const a = await analyze({ rpcUrl, transaction: bytes, user: request.address, addressBook });
+      const a = await analyze({
+        rpcUrl,
+        transaction: bytes,
+        user,
+        addressBook,
+        execution: mode === 'landed' ? landed : undefined,
+      });
       setAnalysis(a);
       setError(undefined);
+      onAnalysisRef.current?.(a, base64);
       setSeries((prev) => {
         const next = { ...prev };
         for (const swap of a.jupiter) {
@@ -135,17 +163,17 @@ const TxInspector: FC<{
       inFlight.current = false;
       setRunning(false);
     }
-  }, [rpcUrl, bytes, request.address, addressBook, requote]);
+  }, [rpcUrl, bytes, user, addressBook, requote, mode, landed]);
 
   useEffect(() => {
     run();
   }, [run]);
 
   useEffect(() => {
-    if (!live || !active) return;
+    if (!live || !active || mode === 'landed') return;
     const timer = setInterval(run, RESIMULATE_MS);
     return () => clearInterval(timer);
-  }, [live, active, run]);
+  }, [live, active, run, mode]);
 
   // Keeps the "… ago" label current.
   const [, setTick] = useState(0);
@@ -179,6 +207,115 @@ const TxInspector: FC<{
 
   if (!active) return null;
 
+  const status = (
+    <div className="ml-auto flex min-w-0 items-center gap-2 text-[11px] text-ink-2">
+      {landed ? (
+        <Segmented<'landed' | 'now'>
+          value={mode}
+          onChange={setMode}
+          items={[
+            { id: 'landed', label: 'On chain' },
+            { id: 'now', label: 'Simulated now' },
+          ]}
+        />
+      ) : null}
+      <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={(live && mode === 'now') || running} />
+      <span className="truncate">
+        {running && !analysis
+          ? 'Loading…'
+          : analysis?.source === 'landed'
+            ? `landed${analysis.landed?.blockTime ? ` ${timeAgo(analysis.landed.blockTime * 1000)}` : ''}`
+            : analysis
+              ? timeAgo(analysis.simulatedAt)
+              : ''}
+        {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
+      </span>
+      {mode === 'now' ? <Switch checked={live} onChange={setLive} label="Live" /> : null}
+      <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
+        <RefreshIcon size={13} className={running ? 'animate-spin' : ''} />
+      </IconButton>
+    </div>
+  );
+
+  const errorBox = error ? (
+    <div className="mb-5 rounded-card bg-neg-soft px-4 py-3 text-sm">
+      <div className="font-semibold text-neg">The RPC did not answer</div>
+      <div className="mt-0.5 break-words text-ink-2">{error}</div>
+      <div className="mt-1 text-xs text-ink-3">Check the RPC URL in Sherlock's settings.</div>
+    </div>
+  ) : null;
+
+  const summary = analysis ? (
+    <div className="space-y-3">
+      <ErrorBanner a={analysis} />
+      <BalanceCard a={analysis} />
+      <ExecutionCard
+        a={analysis}
+        quote={analysis.jupiter[0] ? quotes[analysis.jupiter[0].path] : undefined}
+        onRequote={() => analysis.jupiter[0] && requote(analysis, analysis.jupiter[0].path)}
+      />
+      <div className="pt-1">
+        {analysis.jupiter.map((swap) => (
+          <RouteSection key={swap.path} a={analysis} swap={swap} series={series[swap.path] ?? []} />
+        ))}
+        <RoutersSection a={analysis} />
+        <FeesSection a={analysis} defaultOpen={wide} withBreakdown={!wide} />
+        <ChecksSection a={analysis} defaultOpen={wide} />
+        <OthersSection
+          a={analysis}
+          renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
+        />
+      </div>
+    </div>
+  ) : null;
+
+  const detail = (id: DetailId) =>
+    !analysis ? null : id === 'instructions' ? (
+      <InstructionsTab a={analysis} />
+    ) : id === 'accounts' ? (
+      <AccountsTab a={analysis} />
+    ) : id === 'compute' ? (
+      <ComputeSection a={analysis} defaultOpen />
+    ) : id === 'logs' ? (
+      <LogsTab a={analysis} />
+    ) : (
+      <RawTab a={analysis} base64={base64} explorerUrl={explorerInspectorUrl(bytes)} onExport={exportReport} />
+    );
+
+  if (wide) {
+    return (
+      <div>
+        <div className="mb-3 flex items-center gap-3">{status}</div>
+        {errorBox}
+        {!analysis ? (
+          error ? null : (
+            <Skeleton />
+          )
+        ) : (
+          <div className="grid grid-cols-[minmax(440px,520px)_minmax(0,1fr)] items-start gap-6">
+            <div className="min-w-0">{summary}</div>
+            <div className="min-w-0 rounded-card border border-line bg-raised p-4">
+              <Segmented<DetailId>
+                value={detailTab}
+                onChange={setDetailTab}
+                items={[
+                  { id: 'instructions', label: `Instructions · ${analysis.instructions.length}` },
+                  { id: 'accounts', label: `Accounts · ${analysis.accounts.length}` },
+                  { id: 'compute', label: 'Compute' },
+                  { id: 'logs', label: 'Logs' },
+                  { id: 'raw', label: 'Raw' },
+                ]}
+              />
+              <div key={detailTab} className="fade-in mt-4">
+                {detail(detailTab)}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="mb-2.5 flex items-center gap-3">
@@ -188,67 +325,22 @@ const TxInspector: FC<{
           items={[
             { id: 'summary', label: 'Summary' },
             { id: 'instructions', label: `Instructions${analysis ? ` · ${analysis.instructions.length}` : ''}` },
+            { id: 'accounts', label: 'Accounts' },
             { id: 'logs', label: 'Logs' },
             { id: 'raw', label: 'Raw' },
           ]}
         />
-        <div className="ml-auto flex min-w-0 items-center gap-2 text-[11px] text-ink-2">
-          <Dot tone={!analysis ? 'muted' : analysis.err ? 'neg' : 'pos'} pulse={live || running} />
-          <span className="truncate">
-            {running && !analysis ? 'Simulating…' : analysis ? timeAgo(analysis.simulatedAt) : ''}
-            {analysis?.slot ? ` · slot ${analysis.slot.toLocaleString()}` : ''}
-          </span>
-          <Switch checked={live} onChange={setLive} label="Live" />
-          <IconButton label="Simulate again" onClick={run} disabled={running} className="h-7 w-7">
-            <RefreshIcon size={13} className={running ? 'animate-spin' : ''} />
-          </IconButton>
-        </div>
+        {status}
       </div>
-
-      {error ? (
-        <div className="mb-5 rounded-card bg-neg-soft px-4 py-3 text-sm">
-          <div className="font-semibold text-neg">The RPC did not answer</div>
-          <div className="mt-0.5 break-words text-ink-2">{error}</div>
-          <div className="mt-1 text-xs text-ink-3">Check the RPC URL in Sherlock's settings.</div>
-        </div>
-      ) : null}
-
+      {errorBox}
       {!analysis ? (
         error ? null : (
           <Skeleton />
         )
       ) : (
-        <>
-          <div key={tab} className="fade-in">
-            {tab === 'summary' ? (
-              <div className="space-y-3">
-                <ErrorBanner a={analysis} />
-                <BalanceCard a={analysis} />
-                <ExecutionCard
-                  a={analysis}
-                  quote={analysis.jupiter[0] ? quotes[analysis.jupiter[0].path] : undefined}
-                  onRequote={() => analysis.jupiter[0] && requote(analysis, analysis.jupiter[0].path)}
-                />
-                <div className="pt-1">
-                  {analysis.jupiter.map((swap) => (
-                    <RouteSection key={swap.path} a={analysis} swap={swap} series={series[swap.path] ?? []} />
-                  ))}
-                  <FeesSection a={analysis} />
-                  <ChecksSection a={analysis} />
-                  <OthersSection
-                    a={analysis}
-                    renderAddress={(address) => <AddressLink address={address} labels={analysis.labels} />}
-                  />
-                </div>
-              </div>
-            ) : null}
-            {tab === 'instructions' ? <InstructionsTab a={analysis} /> : null}
-            {tab === 'logs' ? <LogsTab a={analysis} /> : null}
-            {tab === 'raw' ? (
-              <RawTab a={analysis} base64={base64} explorerUrl={explorerUrl(bytes)} onExport={exportReport} />
-            ) : null}
-          </div>
-        </>
+        <div key={tab} className="fade-in">
+          {tab === 'summary' ? summary : detail(tab)}
+        </div>
       )}
     </div>
   );
@@ -291,21 +383,66 @@ const METHOD_LABEL: Record<InspectRequest['method'], string> = {
   signAndSendTransaction: 'Sign and send',
   signMessage: 'Sign message',
   paste: 'Pasted transaction',
+  replay: 'Landed transaction',
 };
 
 export const Inspect: FC = () => {
   const { accounts } = useAccounts();
   const id = new URLSearchParams(window.location.search).get('request');
   const [request, setRequest] = useState<InspectRequest | null>();
-  const [txIndex, setTxIndex] = useState(0);
+  // With several transactions the bundle view comes first (-1), then each transaction.
+  const [txIndex, setTxIndex] = useState(-1);
   const [live, setLive] = useState(true);
 
+  const { rpcUrl } = useConnection();
+  const [landed, setLanded] = useState<Execution>();
+  const [latest, setLatest] = useState<{ a: Analysis; base64: string }>();
+  const [copied, setCopied] = useState(false);
+  const copyReport = async () => {
+    if (!latest || !request) return;
+    let rpcHost: string | undefined;
+    try {
+      rpcHost = new URL(rpcUrl).host;
+    } catch {
+      rpcHost = undefined;
+    }
+    const text = supportReport(latest.a, {
+      origin: request.origin,
+      method: request.method,
+      transactionBase64: latest.base64,
+      rpcHost,
+    });
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const [loadError, setLoadError] = useState<string>();
+
   useEffect(() => {
-    rpc.callMethod('getRequest', [id]).then((r) => setRequest(r ?? null));
-  }, [id]);
+    rpc.callMethod('getRequest', [id]).then(async (r: InspectRequest | null) => {
+      if (r?.method === 'replay' && r.signature && !r.transactions?.length) {
+        try {
+          const result = await fetchLanded(rpcUrl, r.signature);
+          setLanded(result.execution);
+          setRequest({ ...r, transactions: [Buffer.from(result.transaction).toString('base64')] });
+        } catch (e) {
+          setLoadError((e as Error).message);
+          setRequest(null);
+        }
+        return;
+      }
+      setRequest(r ?? null);
+    });
+  }, [id, rpcUrl]);
 
   const label = request ? accounts.find((a) => a.address.toBase58() === request.address)?.label : undefined;
   const count = request?.transactions?.length ?? 0;
+  const activeIndex = count > 1 ? txIndex : 0;
+  const bundleBytes = useMemo(() => (request?.transactions ?? []).map(fromBase64), [request]);
+  const addressBook = useMemo(
+    () => Object.fromEntries(accounts.map((acc) => [acc.address.toBase58(), acc.label])),
+    [accounts]
+  );
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -338,7 +475,9 @@ export const Inspect: FC = () => {
 
       <main className="flex-1 px-5 pb-4 pt-3">
         {request === undefined ? <Skeleton /> : null}
-        {request === null ? <p className="text-sm text-ink-2">This request is no longer in the history.</p> : null}
+        {request === null ? (
+          <p className="text-sm text-ink-2">{loadError ?? 'This request is no longer in the history.'}</p>
+        ) : null}
         {request?.kind === 'message' ? <MessageView request={request} /> : null}
         {request?.kind === 'transactions' ? (
           <>
@@ -346,22 +485,55 @@ export const Inspect: FC = () => {
               <div className="mb-3 flex items-center gap-2">
                 <Pill>{count} transactions</Pill>
                 <Segmented<string>
-                  value={String(txIndex)}
+                  value={String(activeIndex)}
                   onChange={(v) => setTxIndex(Number(v))}
-                  items={request.transactions!.map((_, i) => ({ id: String(i), label: `${i + 1}` }))}
+                  items={[
+                    { id: '-1', label: 'Bundle' },
+                    ...request.transactions!.map((_, i) => ({ id: String(i), label: `${i + 1}` })),
+                  ]}
                 />
               </div>
             ) : null}
+            {count > 1 && activeIndex === -1 ? (
+              <BundleView
+                rpcUrl={rpcUrl}
+                transactions={bundleBytes}
+                user={request.address}
+                addressBook={addressBook}
+                onOpen={setTxIndex}
+              />
+            ) : null}
             {request.transactions!.map((_, i) => (
-              <TxInspector key={i} request={request} index={i} active={i === txIndex} live={live} setLive={setLive} />
+              <TxInspector
+                key={i}
+                request={request}
+                index={i}
+                active={i === activeIndex}
+                live={live}
+                setLive={setLive}
+                landed={landed}
+                onAnalysis={(a, base64) => setLatest({ a, base64 })}
+              />
             ))}
           </>
         ) : null}
       </main>
 
-      <footer className="sticky bottom-0 border-t border-line bg-canvas px-5 py-3">
-        <Button kind="dark" size="md" className="w-full" onClick={() => window.close()}>
-          {request?.method === 'paste' ? 'Done' : 'Reject and close'}
+      <footer className="sticky bottom-0 flex gap-3 border-t border-line bg-canvas px-5 py-3">
+        {request?.kind === 'transactions' ? (
+          <Button
+            kind="outline"
+            size="md"
+            onClick={copyReport}
+            disabled={!latest}
+            title="Copies a Markdown report with a command that reproduces the simulation"
+          >
+            {copied ? <CheckIcon size={14} className="text-pos" /> : <CopyIcon size={14} />}
+            {copied ? 'Copied' : 'Copy report for support'}
+          </Button>
+        ) : null}
+        <Button kind="dark" size="md" className="flex-1" onClick={() => window.close()}>
+          {request?.method === 'paste' || request?.method === 'replay' ? 'Done' : 'Reject and close'}
         </Button>
       </footer>
     </div>

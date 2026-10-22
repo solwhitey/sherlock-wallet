@@ -12,12 +12,16 @@ import {
   isEventInstruction,
   NormalizedIdl,
 } from './idl';
-import { matchGroups, parseLogs } from './logs';
+import { InvokeNode, matchGroups, parseInvokeTree, parseLogs } from './logs';
+import { RouterHops, routerHops } from './flows';
+import { safetyChecks } from './safety';
 import {
   COMPUTE_BUDGET_PROGRAM,
   DEFAULT_CU_PER_INSTRUCTION,
   DEFAULT_LOADED_ACCOUNTS_DATA_LIMIT,
   JITO_TIP_ACCOUNTS,
+  JUPITER_V6,
+  isTokenProgram,
   KNOWN_PROGRAMS,
   LAMPORTS_PER_SIGNATURE,
   MAX_CU_LIMIT,
@@ -33,6 +37,20 @@ import { describeError, ErrorDescription } from './errors';
 export const SOL = 'SOL';
 
 export type AccountMeta = { address: string; writable: boolean; signer: boolean; name?: string };
+
+// Everything known about one account of the transaction, as a block explorer would list it.
+export type AccountDetail = AccountMeta & {
+  index: number;
+  feePayer: boolean;
+  fromLookupTable: boolean;
+  preLamports?: number;
+  postLamports?: number;
+  token?: { mint: string; owner: string; decimals: number; pre: bigint; post: bigint };
+  owner?: string; // program owning the account (on-chain, cached for a minute)
+  executable?: boolean;
+  dataSize?: number;
+  exists?: boolean;
+};
 
 export type Instr = {
   path: string; // "2" for a top-level instruction, "2.3" for its third inner instruction
@@ -80,6 +98,9 @@ export type PriorityFeeStats = { p25: number; p50: number; p75: number; p90: num
 
 export type Analysis = {
   simulatedAt: number;
+  // Where the result comes from: a simulation now, the chain (a landed transaction) or a bundle.
+  source: 'simulation' | 'landed' | 'bundle';
+  landed?: { signature?: string; slot?: number; blockTime?: number };
   slot?: number;
   version: TxVersion;
   size: number;
@@ -97,6 +118,7 @@ export type Analysis = {
   loadedAccountsDataSize?: number;
   loadedAccountsDataLimit: number;
   accountKeys: AccountMeta[];
+  accounts: AccountDetail[];
   instructions: Instr[];
   logs: string[];
   logsTruncated: boolean;
@@ -104,7 +126,10 @@ export type Analysis = {
   others: OwnerChanges[];
   swap?: GenericSwap;
   jupiter: JupiterSwap[];
+  // Swap legs of other routers (OKX, DFlow, Titan…), read from the token movements of each venue call.
+  routers: RouterHops[];
   rfq?: RfqFill;
+  invokeTree: InvokeNode[];
   priorityFees?: PriorityFeeStats;
   // Programs called at the top level, other than the runtime's own (compute budget, system, token…).
   programs: string[];
@@ -115,11 +140,22 @@ export type Analysis = {
   checks: Check[];
 };
 
+// An execution result in simulateTransaction's shape. Given one (a landed transaction's meta, a
+// bundle simulation's entry), the analysis reads it instead of simulating.
+export type Execution = {
+  value: any;
+  slot?: number;
+  source: 'landed' | 'bundle';
+  blockTime?: number;
+  signature?: string;
+};
+
 export type AnalyzeInput = {
   rpcUrl: string;
   transaction: Uint8Array;
   user?: string;
   addressBook?: Record<string, string>;
+  execution?: Execution;
 };
 
 const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64');
@@ -198,21 +234,24 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   const user = input.user ?? feePayer ?? '';
   const recentBlockhash = tx?.recentBlockhash;
 
-  const simPromise = rpcCall<any>(rpcUrl, 'simulateTransaction', [
-    toBase64(transaction),
-    {
-      encoding: 'base64',
-      sigVerify: false,
-      replaceRecentBlockhash: true,
-      innerInstructions: true,
-      commitment: 'confirmed',
-    },
-  ]);
-  const blockhashPromise = recentBlockhash
-    ? rpcCall<{ value: boolean }>(rpcUrl, 'isBlockhashValid', [recentBlockhash, { commitment: 'confirmed' }])
-        .then((r) => r.value)
-        .catch(() => undefined)
-    : Promise.resolve(undefined);
+  const simPromise = input.execution
+    ? Promise.resolve({ context: { slot: input.execution.slot }, value: input.execution.value })
+    : rpcCall<any>(rpcUrl, 'simulateTransaction', [
+        toBase64(transaction),
+        {
+          encoding: 'base64',
+          sigVerify: false,
+          replaceRecentBlockhash: true,
+          innerInstructions: true,
+          commitment: 'confirmed',
+        },
+      ]);
+  const blockhashPromise =
+    recentBlockhash && !input.execution
+      ? rpcCall<{ value: boolean }>(rpcUrl, 'isBlockhashValid', [recentBlockhash, { commitment: 'confirmed' }])
+          .then((r) => r.value)
+          .catch(() => undefined)
+      : Promise.resolve(undefined);
 
   // An RPC that cannot simulate the transaction (e.g. a format it does not support yet) still
   // leaves everything that can be read from the transaction itself.
@@ -428,7 +467,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   for (const ix of instructions) {
     for (const a of ix.accounts) if (a.name?.includes('mint')) mints.add(a.address);
   }
-  const tokenInfos = await getTokenInfos([...mints]);
+  const [tokenInfos, onChain] = await Promise.all([getTokenInfos([...mints]), accountInfos(rpcUrl, keys)]);
   const tokens: Record<string, TokenInfo> = Object.fromEntries(tokenInfos);
 
   const labels: Record<string, string> = {};
@@ -461,7 +500,7 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     ammLabels,
     simulationFailed: !!value.err,
   });
-  if (error?.name === 'SlippageToleranceExceeded') {
+  if (error?.name === 'SlippageToleranceExceeded' && !input.execution) {
     await Promise.all(jupiter.map((j) => measureShortfall(rpcUrl, transaction, instructions, j)));
   }
 
@@ -476,11 +515,24 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
   );
 
   const rfq = detectRfq(instructions);
+  const extraMints = await resolveTransferMints(rpcUrl, instructions, tokenAccountOwner);
+  const mintOf = (account?: string) =>
+    account ? (tokenAccountOwner.get(account)?.mint ?? extraMints.get(account)) : undefined;
+  const labelOf = (program: string) => labels[program] ?? `${program.slice(0, 4)}…${program.slice(-4)}`;
+  const routers = instructions
+    .filter((ix) => ix.programId !== JUPITER_V6)
+    .map((ix) => routerHops(ix, mintOf, labelOf, { sold: swap?.sold.mint, bought: swap?.bought.mint }))
+    .filter((r): r is RouterHops => !!r);
 
   const [blockhashValid, priorityFees] = await Promise.all([blockhashPromise, priorityPromise]);
 
   const analysis: Analysis = {
     simulatedAt: Date.now(),
+    source: input.execution?.source ?? 'simulation',
+    landed:
+      input.execution?.source === 'landed'
+        ? { signature: input.execution.signature, slot: input.execution.slot, blockTime: input.execution.blockTime }
+        : undefined,
     slot: sim.context?.slot,
     v1Config,
     version,
@@ -504,6 +556,32 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     loadedAccountsDataSize: value.loadedAccountsDataSize,
     loadedAccountsDataLimit: loadedLimit,
     accountKeys,
+    accounts: accountKeys.map((meta, i) => {
+      const token = tokenByIndex.get(i);
+      const t = token?.post ?? token?.pre;
+      const info = onChain.get(meta.address);
+      return {
+        ...meta,
+        index: i,
+        feePayer: i === 0,
+        fromLookupTable: i >= staticKeys.length,
+        preLamports: preBalances[i],
+        postLamports: postBalances[i],
+        token: t
+          ? {
+              mint: t.mint,
+              owner: t.owner ?? '',
+              decimals: t.uiTokenAmount.decimals,
+              pre: BigInt(token?.pre?.uiTokenAmount.amount ?? 0),
+              post: BigInt(token?.post?.uiTokenAmount.amount ?? 0),
+            }
+          : undefined,
+        owner: info?.owner,
+        executable: info?.executable,
+        dataSize: info?.dataSize,
+        exists: info ? info.exists : undefined,
+      };
+    }),
     instructions,
     logs: value.logs ?? [],
     logsTruncated: parsedLogs.truncated,
@@ -511,7 +589,9 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     others,
     swap,
     jupiter,
+    routers,
     rfq,
+    invokeTree: parseInvokeTree(value.logs ?? []),
     priorityFees,
     programs: [...new Set(instructions.map((ix) => ix.programId).filter((id) => !BUILTIN_PROGRAMS.has(id)))],
     tokens,
@@ -519,6 +599,16 @@ export async function analyze(input: AnalyzeInput): Promise<Analysis> {
     checks: [],
   };
   analysis.checks = buildChecks(analysis, !!tx);
+  const idlPrograms = new Set([...idls.entries()].filter(([, idl]) => idl).map(([id]) => id));
+  analysis.checks.push(
+    ...(await safetyChecks(
+      rpcUrl,
+      analysis,
+      idlPrograms,
+      mintOf,
+      (mint) => decimals.get(mint) ?? tokens[mint]?.decimals
+    ))
+  );
   return analysis;
 }
 
@@ -562,6 +652,77 @@ async function measureShortfall(rpcUrl: string, transaction: Uint8Array, instruc
   } catch {
     // Best effort: the failure is already reported.
   }
+}
+
+// Token accounts moved inside venue calls are not always in the RPC's token balance lists; their
+// mint is the first 32 bytes of their data.
+async function resolveTransferMints(
+  rpcUrl: string,
+  instructions: Instr[],
+  known: Map<string, { owner: string; mint: string }>
+): Promise<Map<string, string>> {
+  const unknown = new Set<string>();
+  for (const ix of instructions) {
+    for (const inner of ix.inner) {
+      const info = inner.parsed?.info as any;
+      if (inner.parsed?.type !== 'transfer' || !info?.source || info.mint) continue;
+      if (!isTokenProgram(inner.programId)) continue;
+      for (const account of [info.source, info.destination]) if (!known.has(account)) unknown.add(account);
+    }
+  }
+  const out = new Map<string, string>();
+  if (!unknown.size) return out;
+  try {
+    const list = [...unknown];
+    const accounts = await getMultipleAccounts(rpcUrl, list);
+    list.forEach((address, i) => {
+      const data = accounts[i]?.data?.[0];
+      if (!data) return;
+      const bytes = Buffer.from(data, 'base64');
+      if (bytes.length >= 165) out.set(address, bs58.encode(bytes.subarray(0, 32)));
+    });
+  } catch {
+    // Unresolved legs are simply left out.
+  }
+  return out;
+}
+
+const accountInfoCache = new Map<
+  string,
+  { at: number; owner?: string; executable?: boolean; dataSize?: number; exists: boolean }
+>();
+
+// Owner, size and executable flag of every account, for the accounts table. These rarely change,
+// so they are cached for a minute (re-simulations then cost no extra request).
+async function accountInfos(rpcUrl: string, addresses: string[]) {
+  const now = Date.now();
+  const missing = addresses.filter((a) => (accountInfoCache.get(a)?.at ?? 0) < now - 60_000);
+  if (missing.length) {
+    try {
+      const results: any[] = [];
+      for (let i = 0; i < missing.length; i += 100) {
+        const chunk = missing.slice(i, i + 100);
+        const r = await rpcCall<{ value: any[] }>(rpcUrl, 'getMultipleAccounts', [
+          chunk,
+          { encoding: 'base64', dataSlice: { offset: 0, length: 0 } },
+        ]);
+        results.push(...r.value);
+      }
+      missing.forEach((address, i) => {
+        const v = results[i];
+        accountInfoCache.set(address, {
+          at: now,
+          owner: v?.owner,
+          executable: v?.executable,
+          dataSize: v?.space,
+          exists: !!v,
+        });
+      });
+    } catch {
+      // The table just shows less.
+    }
+  }
+  return new Map(addresses.map((a) => [a, accountInfoCache.get(a)]));
 }
 
 function detectRfq(instructions: Instr[]): RfqFill | undefined {

@@ -138,6 +138,11 @@ chrome.runtime.onConnect.addListener((port) => {
       await openPopup('inspect', { request: saved.id });
       return saved.id;
     });
+    rpc.exposeMethod('inspectSignature', async ([{ address, signature }]) => {
+      const saved = await saveRequest({ kind: 'transactions', method: 'replay', address, signature, transactions: [] });
+      await openPopup('inspect', { request: saved.id });
+      return saved.id;
+    });
     rpc.exposeMethod('openRequest', async ([id]) => {
       await openPopup('inspect', { request: id });
     });

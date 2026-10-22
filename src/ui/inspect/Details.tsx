@@ -1,9 +1,10 @@
 import clsx from 'clsx';
 import React, { FC, useState } from 'react';
-import type { Analysis, Instr } from '../../sim/analyze';
+import type { AccountDetail, Analysis, Instr } from '../../sim/analyze';
+import { signatureSlots } from '../../sim/tx';
 import { ChevronDown, DownloadIcon, ExternalIcon } from '../kit/icons';
 import { Button, Collapse, CopyButton, Pill } from '../kit/kit';
-import { explorerAddress, shortAddress } from './format';
+import { explorerAddress, formatAmount, lamportsToSol, shortAddress, symbolOf, toneOf } from './format';
 
 export const AddressLink: FC<{
   address: string;
@@ -68,7 +69,9 @@ const InnerRow: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
 };
 
 const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
-  const [open, setOpen] = useState(false);
+  // The failing instruction opens by itself.
+  const [open, setOpen] = useState(!!ix.failed);
+  const [showData, setShowData] = useState(false);
   return (
     <div className={clsx('rounded-card border', ix.failed ? 'border-neg' : 'border-line')}>
       <button
@@ -94,8 +97,21 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
           {ix.decoded?.decodeError ? (
             <p className="text-xs text-warn">Decoding stopped: {ix.decoded.decodeError}</p>
           ) : null}
-          {!ix.decoded && ix.data ? (
-            <div className="mono break-all text-[11px] text-ink-2">0x{Buffer.from(ix.data).toString('hex')}</div>
+          {ix.data ? (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowData(!showData)}
+                className="text-xs font-semibold text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+              >
+                {showData || !ix.decoded ? 'Raw data' : 'Show raw data'} · {ix.data.length} bytes
+              </button>
+              {showData || !ix.decoded ? (
+                <div className="mono mt-1 break-all text-[11px] text-ink-2">
+                  0x{Buffer.from(ix.data).toString('hex')}
+                </div>
+              ) : null}
+            </div>
           ) : null}
           <div>
             <div className="caps mb-1.5">Accounts</div>
@@ -209,17 +225,129 @@ export const RawTab: FC<{ a: Analysis; base64: string; explorerUrl?: string; onE
 
     <textarea readOnly value={base64} className="field mono h-28 resize-none text-[11px] text-ink-2" />
 
+    <Signatures a={a} base64={base64} />
+  </div>
+);
+
+// Which required signatures the transaction carries. A dapp asking you to sign usually leaves only
+// yours empty; co-signed flows (RFQ market makers, relayers) may have signed already.
+export const Signatures: FC<{ a: Analysis; base64: string }> = ({ a, base64 }) => {
+  const slots = signatureSlots(Uint8Array.from(Buffer.from(base64, 'base64')));
+  if (!slots.length) return null;
+  return (
     <div>
-      <div className="caps mb-2">Accounts · {a.accountKeys.length}</div>
-      {a.accountKeys.map((acc, i) => (
-        <div key={i} className="flex items-center gap-3 py-0.5 text-[13px]">
-          <span className="w-6 shrink-0 text-right text-ink-3">{i}</span>
-          <AddressLink address={acc.address} labels={a.labels} chars={8} />
-          <span className="ml-auto shrink-0 text-[11px] text-ink-3">
-            {[acc.writable && 'writable', acc.signer && 'signer'].filter(Boolean).join(' · ')}
-          </span>
+      <div className="caps mb-2">
+        Signatures · {slots.filter((s) => s.present).length} of {slots.length} present
+      </div>
+      {slots.map((s) => (
+        <div key={s.signer} className="flex items-center gap-3 py-1 text-[13px]">
+          <Pill tone={s.present ? 'pos' : 'muted'}>{s.present ? 'Signed' : 'Missing'}</Pill>
+          <AddressLink address={s.signer} labels={a.labels} chars={6} />
+          {s.signature ? (
+            <span className="mono ml-auto truncate text-[11px] text-ink-3">{shortAddress(s.signature, 8)}</span>
+          ) : null}
         </div>
       ))}
+      <p className="mt-1 text-xs text-ink-3">
+        Simulation skips signature checks, so missing ones do not change the result.
+      </p>
     </div>
+  );
+};
+
+const Flag: FC<{ children: React.ReactNode; tone?: 'pos' | 'neg' | 'warn' | 'info' | 'muted' }> = ({
+  children,
+  tone = 'muted',
+}) => (
+  <Pill tone={tone} className="px-1.5 py-0.5 text-[10px]">
+    {children}
+  </Pill>
+);
+
+const AccountRow: FC<{ acc: AccountDetail; a: Analysis }> = ({ acc, a }) => {
+  const solDelta =
+    acc.preLamports !== undefined && acc.postLamports !== undefined ? BigInt(acc.postLamports - acc.preLamports) : 0n;
+  const tokenDelta = acc.token ? acc.token.post - acc.token.pre : 0n;
+  return (
+    <tr className="border-b border-line align-top last:border-0">
+      <td className="py-2 pr-2 text-right text-ink-3">{acc.index}</td>
+      <td className="max-w-0 py-2 pr-3">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <AddressLink address={acc.address} labels={a.labels} chars={6} className="text-[13px]" />
+          <CopyButton text={acc.address} label="Copy address" className="h-6 w-6" />
+        </div>
+        <div className="mt-0.5 flex flex-wrap gap-1">
+          {acc.feePayer ? <Flag tone="info">fee payer</Flag> : null}
+          {acc.signer ? <Flag tone="info">signer</Flag> : null}
+          {acc.writable ? <Flag tone="warn">writable</Flag> : null}
+          {acc.executable ? <Flag>program</Flag> : null}
+          {acc.fromLookupTable ? <Flag>lookup table</Flag> : null}
+          {acc.preLamports === 0 && (acc.postLamports ?? 0) > 0 ? <Flag tone="pos">created</Flag> : null}
+          {(acc.preLamports ?? 0) > 0 && acc.postLamports === 0 ? <Flag tone="neg">closed</Flag> : null}
+        </div>
+      </td>
+      <td className="max-w-0 py-2 pr-3 text-[12px] text-ink-2">
+        <div className="truncate">{acc.owner ? (a.labels[acc.owner] ?? shortAddress(acc.owner)) : '—'}</div>
+        {acc.dataSize !== undefined ? <div className="text-ink-3">{acc.dataSize.toLocaleString()} B</div> : null}
+      </td>
+      <td className="py-2 pr-3 text-right text-[12px]">
+        {acc.postLamports !== undefined ? <div>{lamportsToSol(BigInt(acc.postLamports))}</div> : '—'}
+        {solDelta ? (
+          <div className={toneOf(solDelta)}>{formatAmount(solDelta, 9, { signed: true, maxFraction: 9 })}</div>
+        ) : null}
+      </td>
+      <td className="py-2 text-right text-[12px]">
+        {acc.token ? (
+          <>
+            <div>
+              {formatAmount(acc.token.post, acc.token.decimals, { maxFraction: 4 })}{' '}
+              {symbolOf(acc.token.mint, a.tokens)}
+            </div>
+            {tokenDelta ? (
+              <div className={toneOf(tokenDelta)}>
+                {formatAmount(tokenDelta, acc.token.decimals, { signed: true, maxFraction: 6 })}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <span className="text-ink-3">—</span>
+        )}
+      </td>
+    </tr>
+  );
+};
+
+// Every account the transaction touches, with roles, owner and balances before/after, as a block
+// explorer lists them.
+export const AccountsTab: FC<{ a: Analysis }> = ({ a }) => (
+  <div>
+    <div className="mb-2 text-sm text-ink-2">
+      {a.accounts.length} accounts · {a.accounts.filter((x) => x.writable).length} writable ·{' '}
+      {a.accounts.filter((x) => x.signer).length} signer{a.accounts.filter((x) => x.signer).length > 1 ? 's' : ''} ·{' '}
+      {a.accounts.filter((x) => x.fromLookupTable).length} from lookup tables
+    </div>
+    <table className="w-full table-fixed text-left">
+      <colgroup>
+        <col className="w-8" />
+        <col />
+        <col className="w-32" />
+        <col className="w-32" />
+        <col className="w-40" />
+      </colgroup>
+      <thead>
+        <tr className="border-b border-line text-[11px] text-ink-3">
+          <th className="py-1.5 pr-2 text-right font-medium">#</th>
+          <th className="py-1.5 pr-3 font-medium">Account</th>
+          <th className="py-1.5 pr-3 font-medium">Owner</th>
+          <th className="py-1.5 pr-3 text-right font-medium">SOL after</th>
+          <th className="py-1.5 text-right font-medium">Token after</th>
+        </tr>
+      </thead>
+      <tbody>
+        {a.accounts.map((acc) => (
+          <AccountRow key={acc.index} acc={acc} a={a} />
+        ))}
+      </tbody>
+    </table>
   </div>
 );

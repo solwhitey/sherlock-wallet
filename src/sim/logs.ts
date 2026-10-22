@@ -105,3 +105,41 @@ export function matchGroups(programIds: string[], groups: IxLogGroup[]): number[
   }
   return out;
 }
+
+// The call tree as the logs describe it: every program invocation with the compute units it used
+// (its own and its callees') and whether it failed.
+export type InvokeNode = {
+  programId: string;
+  depth: number;
+  computeUnits?: number;
+  failed?: string;
+  children: InvokeNode[];
+};
+
+export function parseInvokeTree(logs: string[] = []): InvokeNode[] {
+  const roots: InvokeNode[] = [];
+  const stack: InvokeNode[] = [];
+  for (const line of logs) {
+    const invoke = INVOKE.exec(line);
+    if (invoke) {
+      const node: InvokeNode = { programId: invoke[1], depth: Number(invoke[2]), children: [] };
+      (stack[stack.length - 1]?.children ?? roots).push(node);
+      stack.push(node);
+      continue;
+    }
+    const top = stack[stack.length - 1];
+    const consumed = CONSUMED.exec(line);
+    if (consumed && top && consumed[1] === top.programId) {
+      top.computeUnits = Number(consumed[2]);
+      continue;
+    }
+    const failed = FAILED.exec(line);
+    if (failed && top) {
+      top.failed = failed[2];
+      stack.pop();
+      continue;
+    }
+    if (SUCCESS.test(line) && top) stack.pop();
+  }
+  return roots;
+}

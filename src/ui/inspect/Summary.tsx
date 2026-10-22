@@ -176,7 +176,7 @@ function assetName(asset: AssetDelta, a: Analysis) {
   return 'Unlisted token';
 }
 
-const AssetRow: FC<{ asset: AssetDelta; a: Analysis; note?: string }> = ({ asset, a, note }) => {
+export const AssetRow: FC<{ asset: AssetDelta; a: Analysis; note?: string }> = ({ asset, a, note }) => {
   const usd = usdValue(asset, asset.delta, a.tokens);
   return (
     <div className="flex items-center gap-3 py-2.5">
@@ -601,7 +601,11 @@ function priorityRank(a: Analysis) {
   return p >= pf.p90 ? '≥ p90' : p >= pf.p75 ? 'p75–p90' : p >= pf.p50 ? 'p50–p75' : p >= pf.p25 ? 'p25–p50' : '< p25';
 }
 
-export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
+export const FeesSection: FC<{ a: Analysis; defaultOpen?: boolean; withBreakdown?: boolean }> = ({
+  a,
+  defaultOpen,
+  withBreakdown,
+}) => {
   const { fees, rent, compute } = a;
   const rentPaid = rent.created.reduce((s, c) => s + c.lamports, 0n);
   const rentBack = rent.closed.reduce((s, c) => s + c.lamports, 0n);
@@ -610,6 +614,7 @@ export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
   const mib = (b: number) => `${(b / 1024 / 1024).toFixed(1)} MiB`;
   return (
     <Section
+      defaultOpen={defaultOpen}
       title="Fees & compute"
       summary={`${lamportsToSol(totalFee(a))} SOL · ${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()} CU · ${a.size} B`}
     >
@@ -638,7 +643,7 @@ export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
       </div>
       <div className="mt-4 grid grid-cols-3 gap-x-5">
         <Meter
-          label={compute.explicitLimit ? 'Compute' : 'Compute · default limit'}
+          label={compute.explicitLimit ? 'Compute' : 'CU · default'}
           value={compute.consumed ?? 0}
           max={compute.limit}
           text={`${compute.consumed?.toLocaleString() ?? '—'} / ${compute.limit.toLocaleString()}`}
@@ -651,7 +656,7 @@ export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
         />
         {a.loadedAccountsDataSize !== undefined ? (
           <Meter
-            label="Loaded data"
+            label="Data"
             value={a.loadedAccountsDataSize}
             max={a.loadedAccountsDataLimit}
             text={`${mib(a.loadedAccountsDataSize)} / ${mib(a.loadedAccountsDataLimit)}`}
@@ -663,6 +668,12 @@ export const FeesSection: FC<{ a: Analysis }> = ({ a }) => {
           Recent priority fees on these accounts: p50 {a.priorityFees.p50.toLocaleString()} · p75{' '}
           {a.priorityFees.p75.toLocaleString()} · p90 {a.priorityFees.p90.toLocaleString()} µL/CU
         </p>
+      ) : null}
+      {withBreakdown && a.invokeTree.length ? (
+        <div className="mt-4 border-t border-line pt-3">
+          <div className="mb-1 text-[13px] font-semibold">Compute breakdown</div>
+          <ComputeTree a={a} />
+        </div>
       ) : null}
     </Section>
   );
@@ -678,7 +689,7 @@ const CheckRow: FC<{ check: Check }> = ({ check }) => (
   </div>
 );
 
-export const ChecksSection: FC<{ a: Analysis }> = ({ a }) => {
+export const ChecksSection: FC<{ a: Analysis; defaultOpen?: boolean }> = ({ a, defaultOpen }) => {
   const passed = a.checks.filter((c) => c.level === 'ok').length;
   const warnings = a.checks.filter((c) => c.level === 'warn' || c.level === 'error').length;
   const notes = a.checks.filter((c) => c.level === 'info').length;
@@ -687,6 +698,7 @@ export const ChecksSection: FC<{ a: Analysis }> = ({ a }) => {
   const sorted = [...a.checks].sort((x, y) => order[x.level] - order[y.level]);
   return (
     <Section
+      defaultOpen={defaultOpen}
       title="Checks"
       summary={
         <span className="inline-flex items-center gap-1.5">
@@ -734,5 +746,114 @@ export const OthersSection: FC<{ a: Analysis; renderAddress: (address: string) =
         ))}
       </div>
     </Section>
+  );
+};
+
+// ---- Compute breakdown --------------------------------------------------------------------------------
+
+type InvokeNode = Analysis['invokeTree'][number];
+
+const ComputeRow: FC<{ node: InvokeNode; a: Analysis; total: number; depth: number }> = ({ node, a, total, depth }) => {
+  const cu = node.computeUnits ?? 0;
+  const share = total ? cu / total : 0;
+  // Calls under 1% of the transaction are folded into one line per parent.
+  const big = node.children.filter((c) => (c.computeUnits ?? 0) / total >= 0.01);
+  const small = node.children.filter((c) => (c.computeUnits ?? 0) / total < 0.01);
+  const smallCu = small.reduce((s, c) => s + (c.computeUnits ?? 0), 0);
+  return (
+    <>
+      <div className="flex items-center gap-3 py-1 text-[13px]" style={{ paddingLeft: depth * 16 }}>
+        <span
+          className={clsx('w-44 shrink-0 truncate', depth === 0 && 'font-semibold', node.failed && 'text-neg')}
+          title={node.programId}
+        >
+          {a.labels[node.programId] ?? shortAddress(node.programId)}
+        </span>
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-tint">
+          <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(share * 100, cu ? 0.5 : 0)}%` }} />
+        </div>
+        <span className="w-28 shrink-0 text-right text-ink-2">
+          {node.computeUnits !== undefined ? cu.toLocaleString() : '—'}
+        </span>
+        <span className="w-10 shrink-0 text-right text-ink-3">
+          {cu ? `${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%` : ''}
+        </span>
+      </div>
+      {big.map((child, i) => (
+        <ComputeRow key={i} node={child} a={a} total={total} depth={depth + 1} />
+      ))}
+      {small.length ? (
+        <div className="py-0.5 text-xs text-ink-3" style={{ paddingLeft: (depth + 1) * 16 }}>
+          + {small.length} small call{small.length > 1 ? 's' : ''} · {smallCu.toLocaleString()} CU
+        </div>
+      ) : null}
+    </>
+  );
+};
+
+export const ComputeTree: FC<{ a: Analysis }> = ({ a }) => {
+  const total = a.compute.consumed ?? a.invokeTree.reduce((s, n) => s + (n.computeUnits ?? 0), 0);
+  if (!a.invokeTree.length || !total) return null;
+  return (
+    <div>
+      <p className="mb-2 text-xs text-ink-3">
+        Each call counts its own work and its callees'. Runtime overhead outside programs is not attributed.
+      </p>
+      {a.invokeTree.map((node, i) => (
+        <ComputeRow key={i} node={node} a={a} total={total} depth={0} />
+      ))}
+    </div>
+  );
+};
+
+export const ComputeSection: FC<{ a: Analysis; defaultOpen?: boolean }> = ({ a, defaultOpen }) => {
+  const total = a.compute.consumed ?? a.invokeTree.reduce((s, n) => s + (n.computeUnits ?? 0), 0);
+  if (!a.invokeTree.length || !total) return null;
+  const heaviest = [...a.invokeTree].sort((x, y) => (y.computeUnits ?? 0) - (x.computeUnits ?? 0))[0];
+  return (
+    <Section
+      defaultOpen={defaultOpen}
+      title="Compute breakdown"
+      summary={`${a.labels[heaviest.programId] ?? shortAddress(heaviest.programId)} ${Math.round(((heaviest.computeUnits ?? 0) / total) * 100)}% of ${total.toLocaleString()} CU`}
+    >
+      <ComputeTree a={a} />
+    </Section>
+  );
+};
+
+// ---- Other routers ------------------------------------------------------------------------------------
+
+export const RoutersSection: FC<{ a: Analysis }> = ({ a }) => {
+  if (!a.routers.length) return null;
+  const amount = (mint: string | undefined, v: bigint | undefined) => {
+    if (!mint || v === undefined) return '—';
+    const decimals = mint === SOL || mint === WSOL_MINT ? 9 : a.tokens[mint]?.decimals;
+    return `${decimals !== undefined ? formatAmount(v, decimals, { maxFraction: 2 }) : v.toString()} ${symbolOf(mint, a.tokens)}`;
+  };
+  return (
+    <>
+      {a.routers.map((r) => (
+        <Section
+          key={r.path}
+          title={`Route · ${r.label}`}
+          summary={`${r.hops.length} hop${r.hops.length > 1 ? 's' : ''} · ${[...new Set(r.hops.map((h) => h.label))].slice(0, 3).join(', ')}`}
+        >
+          <p className="mb-2 text-xs text-ink-3">Read from the tokens moved inside each venue call.</p>
+          <div className="divide-y divide-line">
+            {r.hops.map((h) => (
+              <div key={h.path} className="flex items-center gap-3 py-2 text-[13px]">
+                <span className="w-10 shrink-0 text-ink-3">{h.path}</span>
+                <span className="w-36 shrink-0 truncate font-semibold" title={h.program}>
+                  {h.label}
+                </span>
+                <span className="truncate text-ink-2">
+                  {amount(h.inputMint, h.inputAmount)} → {amount(h.outputMint, h.outputAmount)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ))}
+    </>
   );
 };

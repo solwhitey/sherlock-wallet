@@ -7,6 +7,17 @@ import { ChevronRight } from '../kit/icons';
 import { Button, Collapse, LetterAvatar, Row } from '../kit/kit';
 import { rpc } from '../rpc';
 
+// A transaction signature: 64 bytes in base58 (also accepted inside an explorer URL).
+function signatureIn(text: string): string | undefined {
+  const candidate = text.trim().match(/(?:\/tx\/)?([1-9A-HJ-NP-Za-km-z]{86,88})(?:[?#].*)?$/)?.[1];
+  if (!candidate) return undefined;
+  try {
+    return base58.decode(candidate).length === 64 ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Accepts a serialized transaction as base64 or base58 (what explorers, logs and APIs hand out).
 function decodeTransaction(text: string): string {
   const trimmed = text.trim().replace(/^"|"$/g, '');
@@ -39,7 +50,9 @@ export const PasteTransaction: FC = () => {
       >
         <div className="min-w-0 flex-1">
           <div className="text-[15px] font-semibold">Inspect a transaction</div>
-          <div className="text-xs text-ink-2">Paste one from a log, an API or an explorer</div>
+          <div className="text-xs text-ink-2">
+            Paste a serialized transaction, or a signature to replay a landed one
+          </div>
         </div>
         <ChevronRight size={18} className={`shrink-0 text-ink-2 transition-transform ${open ? 'rotate-90' : ''}`} />
       </button>
@@ -47,7 +60,7 @@ export const PasteTransaction: FC = () => {
         <div className="space-y-3 px-4 pb-4">
           <textarea
             className="field mono h-24 resize-none text-xs"
-            placeholder="Base64 or base58"
+            placeholder="Base64 / base58 transaction, or a signature"
             value={text}
             onChange={(e) => setText(e.target.value)}
           />
@@ -58,8 +71,13 @@ export const PasteTransaction: FC = () => {
             disabled={!text.trim() || !user}
             onClick={async () => {
               try {
-                const transaction = decodeTransaction(text);
                 setError(undefined);
+                const signature = signatureIn(text);
+                if (signature) {
+                  await rpc.callMethod('inspectSignature', [{ address: user, signature }]);
+                  return;
+                }
+                const transaction = decodeTransaction(text);
                 await rpc.callMethod('inspectPasted', [{ address: user, transactions: [transaction] }]);
               } catch (e) {
                 setError((e as Error).message);
@@ -79,6 +97,7 @@ const METHOD: Record<InspectRequest['method'], string> = {
   signAndSendTransaction: 'Sign and send',
   signMessage: 'Message',
   paste: 'Pasted',
+  replay: 'Replay',
 };
 
 export const RequestHistory: FC = () => {

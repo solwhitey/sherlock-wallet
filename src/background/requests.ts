@@ -3,7 +3,9 @@
 export type InspectRequest = {
   id: string;
   kind: 'transactions' | 'message';
-  method: 'signTransaction' | 'signAndSendTransaction' | 'signMessage' | 'paste';
+  method: 'signTransaction' | 'signAndSendTransaction' | 'signMessage' | 'paste' | 'replay';
+  // For replays: the landed transaction to fetch (its bytes are loaded by the inspector).
+  signature?: string;
   address: string;
   origin?: string;
   chain?: string;
