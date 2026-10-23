@@ -16,6 +16,8 @@
     --hover: #eeeeeb;
     --selected: #e8e8e5;
     --tint: #ecebe7;
+    /* The selected segment of a segmented control (tabs, Mainnet/Fork): must stand out from --tint. */
+    --segment: #ffffff;
     --pos: #0e7a54;
     --pos-soft: #e8f5ef;
     --neg: #c13515;
@@ -47,6 +49,7 @@
     --hover: #151b24;
     --selected: #1b2330;
     --tint: #111620;
+    --segment: #2a3342;
     --accent: #c7f284;
     --accent-ink: #0b0e13;
     --pos: #c7f284;
@@ -73,6 +76,7 @@
       --hover: #151b24;
       --selected: #1b2330;
       --tint: #111620;
+      --segment: #2a3342;
       --accent: #c7f284;
       --accent-ink: #0b0e13;
       --pos: #c7f284;

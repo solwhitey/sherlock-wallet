@@ -101,7 +101,7 @@ export function Segmented<T extends string>({
     <div ref={container} className={clsx('relative inline-flex rounded-full bg-tint p-1', className)}>
       {indicator ? (
         <span
-          className="absolute bottom-1 top-1 rounded-full bg-raised shadow-[0_1px_3px_rgba(0,0,0,0.12)] transition-all duration-[var(--dur-2)] ease-[var(--ease-out)] motion-reduce:transition-none"
+          className="absolute bottom-1 top-1 rounded-full bg-[var(--segment)] shadow-[0_1px_3px_rgba(0,0,0,0.12),inset_0_0_0_1px_rgba(255,255,255,0.04)] transition-all duration-[var(--dur-2)] ease-[var(--ease-out)] motion-reduce:transition-none"
           style={{ left: indicator.left, width: indicator.width }}
         />
       ) : null}
