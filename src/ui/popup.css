@@ -137,7 +137,7 @@
       sans-serif;
     font-feature-settings: 'tnum' 1;
     -webkit-font-smoothing: antialiased;
-    overflow-x: hidden;
+    overflow-x: auto;
   }
 
   ::selection {

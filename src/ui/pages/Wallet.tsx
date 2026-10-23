@@ -71,7 +71,7 @@ const when = (ms?: number) => (ms ? timeAgo(ms) : '');
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 const Card: FC<{ title: ReactNode; right?: ReactNode; children: ReactNode }> = ({ title, right, children }) => (
-  <section className="rounded-card border border-line bg-raised px-5 py-4">
+  <section className="rounded-card border border-line bg-raised px-5 py-4 max-[560px]:px-4">
     <div className="mb-2 flex min-h-[28px] items-center gap-3">
       <h2 className="truncate text-[15px] font-semibold">{title}</h2>
       {right ? <div className="ml-auto flex shrink-0 items-center gap-2">{right}</div> : null}
@@ -582,7 +582,7 @@ export const Wallet: FC = () => {
         </IconButton>
       </header>
 
-      <main className="flex-1 space-y-4 px-5 pb-6 pt-4">
+      <main className="flex-1 space-y-4 px-5 pb-6 pt-4 max-[560px]:px-3">
         {/* Five figures in a row in a window, two per row in the narrow side panel. */}
         <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line bg-line min-[600px]:grid-cols-5 [&>*:last-child]:col-span-2 min-[600px]:[&>*:last-child]:col-span-1 [&>*]:bg-canvas">
           <FigCell label="SOL" value={sol.data === undefined ? '—' : amount(sol.data)} sub={sol.error} />

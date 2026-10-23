@@ -149,7 +149,7 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left"
+        className="flex w-full items-center gap-3 px-4 py-3 text-left max-[560px]:px-3"
       >
         <span className="text-sm text-ink-3">{ix.path}</span>
         <div className="min-w-0 flex-1">
@@ -167,7 +167,7 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
         <ChevronDown size={16} className={clsx('shrink-0 text-ink-2 transition-transform', open && 'rotate-180')} />
       </button>
       <Collapse open={open}>
-        <div className="space-y-4 border-t border-line px-4 py-4">
+        <div className="space-y-4 border-t border-line px-4 py-4 max-[560px]:px-3">
           <Movements ix={ix} a={a} />
 
           <div>
@@ -177,25 +177,33 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
                 // Anchor passes the program itself for an optional account that is not provided.
                 const placeholder = acc.address === ix.programId && i < named;
                 const role = acc.name ?? (i >= named && named ? `extra account #${++extra}` : '');
+                const flags = placeholder ? [] : [acc.writable && 'writable', acc.signer && 'signer'].filter(Boolean);
+                // One row in a window; narrow (side panel), two lines: role and flags, then address
+                // and change.
                 return (
-                  <div key={i} className="flex items-center gap-3 py-1.5 text-[13px]">
-                    <span className="w-5 shrink-0 text-right text-ink-3">{i}</span>
-                    <span className="w-40 shrink-0 truncate text-ink-2" title={role}>
+                  <div
+                    key={i}
+                    className="grid grid-cols-[20px_160px_minmax(0,1fr)_auto_144px] items-center gap-x-3 py-1.5 text-[13px] max-[560px]:grid-cols-[20px_minmax(0,1fr)_auto] max-[560px]:gap-y-0.5"
+                  >
+                    <span className="text-right text-ink-3">{i}</span>
+                    <span className="truncate text-ink-2" title={role}>
                       {role}
                     </span>
-                    <span className="min-w-0 flex-1 truncate">
+                    <span className="min-w-0 truncate max-[560px]:col-start-2 max-[560px]:row-start-2">
                       {placeholder ? (
                         <span className="text-ink-3">none (optional account not provided)</span>
                       ) : (
                         <AddressLink address={acc.address} labels={a.labels} />
                       )}
                     </span>
-                    <span className="shrink-0 text-[11px] text-ink-3">
-                      {placeholder
-                        ? ''
-                        : [acc.writable && 'writable', acc.signer && 'signer'].filter(Boolean).join(' · ')}
+                    <span
+                      className="whitespace-nowrap text-[11px] text-ink-3 max-[560px]:col-start-3 max-[560px]:row-start-1 max-[560px]:text-right"
+                      title={flags.join(' · ')}
+                    >
+                      <span className="max-[560px]:hidden">{flags.join(' · ')}</span>
+                      <span className="min-[561px]:hidden">{flags.map((f) => (f as string)[0]).join(' · ')}</span>
                     </span>
-                    <span className="w-36 shrink-0 text-right text-[12px]">
+                    <span className="whitespace-nowrap text-right text-[12px] max-[560px]:col-start-3 max-[560px]:row-start-2">
                       {placeholder ? null : <AccountChange acc={details.get(acc.address)} a={a} />}
                     </span>
                   </div>
@@ -203,7 +211,8 @@ const InstructionCard: FC<{ ix: Instr; a: Analysis }> = ({ ix, a }) => {
               })}
             </div>
             <p className="mt-1 text-[11px] text-ink-3">
-              Right column: each account's change over the whole transaction.
+              Right column: each account's change over the whole transaction
+              <span className="min-[561px]:hidden">; w writable, s signer</span>.
             </p>
           </div>
 
@@ -393,7 +402,7 @@ const AccountRow: FC<{ acc: AccountDetail; a: Analysis }> = ({ acc, a }) => {
           {(acc.preLamports ?? 0) > 0 && acc.postLamports === 0 ? <Flag tone="neg">closed</Flag> : null}
         </div>
       </td>
-      <td className="max-w-0 py-2 pr-3 text-[12px] text-ink-2">
+      <td className="max-w-0 py-2 pr-3 text-[12px] text-ink-2 max-[560px]:hidden">
         <div className="truncate">{acc.owner ? (a.labels[acc.owner] ?? shortAddress(acc.owner)) : '—'}</div>
         {acc.dataSize !== undefined ? <div className="text-ink-3">{acc.dataSize.toLocaleString()} B</div> : null}
       </td>
@@ -433,28 +442,31 @@ export const AccountsTab: FC<{ a: Analysis }> = ({ a }) => (
       {a.accounts.filter((x) => x.signer).length} signer{a.accounts.filter((x) => x.signer).length > 1 ? 's' : ''} ·{' '}
       {a.accounts.filter((x) => x.fromLookupTable).length} from lookup tables
     </div>
-    <table className="w-full table-fixed text-left">
-      <colgroup>
-        <col className="w-8" />
-        <col />
-        <col className="w-32" />
-        <col className="w-32" />
-        <col className="w-40" />
-      </colgroup>
-      <thead>
-        <tr className="border-b border-line text-[11px] text-ink-3">
-          <th className="py-1.5 pr-2 text-right font-medium">#</th>
-          <th className="py-1.5 pr-3 font-medium">Account</th>
-          <th className="py-1.5 pr-3 font-medium">Owner</th>
-          <th className="py-1.5 pr-3 text-right font-medium">SOL after</th>
-          <th className="py-1.5 text-right font-medium">Token after</th>
-        </tr>
-      </thead>
-      <tbody>
-        {a.accounts.map((acc) => (
-          <AccountRow key={acc.index} acc={acc} a={a} />
-        ))}
-      </tbody>
-    </table>
+    {/* Wider than the side panel: it scrolls sideways in its own box, without the Owner column. */}
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[400px] table-fixed text-left">
+        <colgroup>
+          <col className="w-8" />
+          <col className="min-w-[120px]" />
+          <col className="w-32 max-[560px]:hidden" />
+          <col className="w-28" />
+          <col className="w-36" />
+        </colgroup>
+        <thead>
+          <tr className="border-b border-line text-[11px] text-ink-3">
+            <th className="py-1.5 pr-2 text-right font-medium">#</th>
+            <th className="py-1.5 pr-3 font-medium">Account</th>
+            <th className="py-1.5 pr-3 font-medium max-[560px]:hidden">Owner</th>
+            <th className="py-1.5 pr-3 text-right font-medium">SOL after</th>
+            <th className="py-1.5 text-right font-medium">Token after</th>
+          </tr>
+        </thead>
+        <tbody>
+          {a.accounts.map((acc) => (
+            <AccountRow key={acc.index} acc={acc} a={a} />
+          ))}
+        </tbody>
+      </table>
+    </div>
   </div>
 );

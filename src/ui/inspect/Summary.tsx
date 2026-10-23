@@ -45,7 +45,7 @@ const Card: FC<{ title?: ReactNode; right?: ReactNode; className?: string; child
   className,
   children,
 }) => (
-  <section className={clsx('rounded-card border border-line bg-raised px-5 py-4', className)}>
+  <section className={clsx('rounded-card border border-line bg-raised px-5 py-4 max-[560px]:px-4', className)}>
     {title || right ? (
       <div className="mb-2 flex min-h-[28px] items-center gap-3">
         <h2 className="truncate text-[15px] font-semibold">{title}</h2>

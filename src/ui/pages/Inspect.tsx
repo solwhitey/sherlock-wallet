@@ -640,7 +640,7 @@ export const Inspect: FC = () => {
         ) : null}
       </header>
 
-      <main className="flex-1 px-5 pb-4 pt-3">
+      <main className="flex-1 px-5 pb-4 pt-3 max-[560px]:px-3">
         {request === undefined ? <Skeleton /> : null}
         {request === null ? (
           <p className="text-sm text-ink-2">{loadError ?? 'This request is no longer in the history.'}</p>
@@ -686,7 +686,7 @@ export const Inspect: FC = () => {
         ) : null}
       </main>
 
-      <footer className="sticky bottom-0 flex gap-3 border-t border-line bg-canvas px-5 py-3">
+      <footer className="sticky bottom-0 flex gap-3 border-t border-line bg-canvas px-5 py-3 max-[560px]:px-3">
         {request?.kind === 'transactions' ? (
           <Button
             kind="outline"
