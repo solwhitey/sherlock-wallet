@@ -12,17 +12,24 @@ With this system, you can pretend to be any given address, have some tokens or e
 
 
 # Installation
-### Chrome extension store
-https://chromewebstore.google.com/detail/sherlock-wallet/fnkhhpcgjmehogcdgjihbfbbgcfmogmd
 
-### Or, locally
-To use the Sherlock Wallet, you need to have Node.js and pnpm installed. Then setup this repo with
+The Chrome Web Store has an older version without the inspector. To get this one, build it locally:
 
-`pnpm i`
+1. Install [Node.js](https://nodejs.org) 20 or later. pnpm comes through `npx`, so there is nothing else to install.
+2. Clone this repo, then build it:
 
-`pnpm start`
+   ```bash
+   npx pnpm@10 install
+   npx pnpm@10 build
+   ```
 
-In Chrome/Brave, Go to "More tools" > "Extensions." Enable "Developer mode" by toggling the switch on the top right corner of the page. Click on "Load unpacked" button, select the `dist` folder generated in this repo (or `build` after `pnpm build`).
+3. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the **`build`** folder created inside the repo.
+
+Pick `build`, not the repo itself or `src`. Those hold the TypeScript sources, and Chrome refuses them with *"Could not load file 'content/index.ts' for content script"*.
+
+After pulling new changes, run `npx pnpm@10 build` again, then click the reload icon on Sherlock's card in `chrome://extensions`.
+
+For development, `npx pnpm@10 start` rebuilds into `dist` on every change; load `dist` instead.
 
 # Features
 
