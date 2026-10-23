@@ -164,9 +164,8 @@ export class SherlockWallet implements Wallet {
   // `silent` is how dapps reconnect on page load: Sherlock answers it from the sites already
   // approved, without opening a window, and returns no accounts otherwise.
   #connect: StandardConnectMethod = async ({ silent } = {}) => {
-    const accounts = (await this.#rpc.callMethod('connect', [
-      { origin: window.location.origin, key: requestKey(), silent: !!silent },
-    ])) as { publicKey: Uint8Array }[] | null;
+    const accounts = (await this.#rpc.callMethod('connect', [{ key: requestKey(), silent: !!silent }])) as
+      { publicKey: Uint8Array }[] | null;
 
     if (accounts === null) {
       if (silent) return { accounts: [] };
@@ -185,7 +184,7 @@ export class SherlockWallet implements Wallet {
   #disconnect: StandardDisconnectMethod = async () => {
     this.#accounts = [];
     this.#emit('change', { accounts: this.accounts });
-    await this.#rpc.callMethod('disconnect', [{ origin: window.location.origin }]);
+    await this.#rpc.callMethod('disconnect');
   };
 
   // Sherlock holds no keys: every request opens the inspector and is rejected once it closes.
@@ -202,7 +201,6 @@ export class SherlockWallet implements Wallet {
         method,
         address: inputs[0].account.address,
         chain: inputs[0].chain,
-        origin: window.location.origin,
         key: requestKey(),
         transactions: inputs.map((i) => i.transaction),
       },
@@ -221,9 +219,7 @@ export class SherlockWallet implements Wallet {
 
   #signMessage: SolanaSignMessageMethod = async (...inputs) => {
     const [{ account, message }] = inputs;
-    await this.#rpc.callMethod('inspectMessage', [
-      { address: account.address, message, origin: window.location.origin, key: requestKey() },
-    ]);
+    await this.#rpc.callMethod('inspectMessage', [{ address: account.address, message, key: requestKey() }]);
     throw new Error(REJECTED);
   };
 

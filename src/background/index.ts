@@ -15,7 +15,8 @@ const popupRPC = (tabId: number) => {
   if (!state) popupRPCs.set(tabId, (state = asyncState<RPC>()));
   return state;
 };
-const contentRPCs = new Set<RPC>();
+// Connected content scripts (one per tab), with the site's origin as Chrome reports it.
+const contentRPCs = new Map<RPC, string | undefined>();
 
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
@@ -245,7 +246,11 @@ chrome.runtime.onConnect.addListener((port) => {
     });
     rpc.exposeMethod('changeAccounts', async (params) => {
       await setConnectedAccounts(params);
-      for (const content of contentRPCs) content.callMethod('changeAccounts', params);
+      // Only sites the user connected learn the new address; other tabs never see it.
+      const approved = await approvedOrigins();
+      for (const [content, origin] of contentRPCs) {
+        if (origin && approved.includes(origin)) content.callMethod('changeAccounts', params);
+      }
     });
     rpc.exposeMethod('connectedAccounts', getConnectedAccounts);
 
@@ -295,48 +300,49 @@ chrome.runtime.onConnect.addListener((port) => {
     const rpc = createRPC(transport);
     // The dapp's browser window: its side panel shows the dapp's requests.
     const dappWindow = port.sender?.tab?.windowId;
+    // The site's origin from Chrome, never from the page: the wallet object runs in the page, so
+    // any site could claim to be jup.ag. Origins the page sends are ignored.
+    const senderUrl = port.sender?.url;
+    const origin = port.sender?.origin ?? (senderUrl ? new URL(senderUrl).origin : undefined);
 
-    rpc.exposeMethod(
-      'connect',
-      async ([{ origin, key, silent } = {} as { origin?: string; key?: string; silent?: boolean }]) => {
-        const panelOpening = silent ? Promise.resolve(false) : tryOpenPanel(dappWindow);
-        const current = await getConnectedAccounts();
-        const trusted = !!origin && (await approvedOrigins()).includes(origin) && !!current?.length;
-        if (trusted) return current;
-        if (silent) return null;
+    rpc.exposeMethod('connect', async ([{ key, silent } = {} as { key?: string; silent?: boolean }]) => {
+      const panelOpening = silent ? Promise.resolve(false) : tryOpenPanel(dappWindow);
+      const current = await getConnectedAccounts();
+      const trusted = !!origin && (await approvedOrigins()).includes(origin) && !!current?.length;
+      if (trusted) return current;
+      if (silent) return null;
 
-        approvalInFlight ??= keepAlive(async () => {
-          const handle = await requestWindow(
-            key,
-            { windowId: dappWindow, panelOpening },
-            'approveConnection',
-            async (): Promise<Record<string, string>> => (origin ? { origin } : {})
-          );
-          const { closePopup, popupClosed, tabId } = handle;
-          if (!handle.rpc && tabId === undefined) throw new Error('approval window has no tab');
+      approvalInFlight ??= keepAlive(async () => {
+        const handle = await requestWindow(
+          key,
+          { windowId: dappWindow, panelOpening },
+          'approveConnection',
+          async (): Promise<Record<string, string>> => (origin ? { origin } : {})
+        );
+        const { closePopup, popupClosed, tabId } = handle;
+        if (!handle.rpc && tabId === undefined) throw new Error('approval window has no tab');
 
-          // A reused window reconnects its port after a restart; wait for it (or for it to close).
-          const approval = handle.rpc ?? (await Promise.race([popupRPC(tabId!).get(), popupClosed]));
-          const response = approval ? await Promise.race([approval.callMethod('connect'), popupClosed]) : null;
+        // A reused window reconnects its port after a restart; wait for it (or for it to close).
+        const approval = handle.rpc ?? (await Promise.race([popupRPC(tabId!).get(), popupClosed]));
+        const response = approval ? await Promise.race([approval.callMethod('connect'), popupClosed]) : null;
 
-          await setConnectedAccounts(response);
-          await forgetWindow(key);
-          closePopup();
-          return response;
-        }).finally(() => {
-          approvalInFlight = undefined;
-        });
-        const response = await approvalInFlight;
-        if (response && origin) await setApproved(origin, true);
+        await setConnectedAccounts(response);
+        await forgetWindow(key);
+        closePopup();
         return response;
-      }
-    );
+      }).finally(() => {
+        approvalInFlight = undefined;
+      });
+      const response = await approvalInFlight;
+      if (response && origin) await setApproved(origin, true);
+      return response;
+    });
 
-    rpc.exposeMethod('disconnect', async ([{ origin } = {} as { origin?: string }]) => {
+    rpc.exposeMethod('disconnect', async () => {
       if (origin) await setApproved(origin, false);
     });
 
-    rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, origin, key }]) =>
+    rpc.exposeMethod('inspectTransactions', async ([{ method, address, transactions, chain, key }]) =>
       inspect(
         key,
         { windowId: dappWindow, panelOpening: tryOpenPanel(dappWindow) },
@@ -351,7 +357,7 @@ chrome.runtime.onConnect.addListener((port) => {
       )
     );
 
-    rpc.exposeMethod('inspectMessage', async ([{ address, message, origin, key }]) =>
+    rpc.exposeMethod('inspectMessage', async ([{ address, message, key }]) =>
       inspect(
         key,
         { windowId: dappWindow, panelOpening: tryOpenPanel(dappWindow) },
@@ -364,6 +370,6 @@ chrome.runtime.onConnect.addListener((port) => {
       rpc.end();
     });
 
-    contentRPCs.add(rpc);
+    contentRPCs.set(rpc, origin);
   }
 });
