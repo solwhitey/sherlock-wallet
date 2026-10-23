@@ -17,8 +17,8 @@ The Chrome Web Store has an older version without the inspector. Get this one pr
 
 ### Prebuilt
 
-1. Download [`sherlock-wallet-0.1.0.zip`](https://github.com/solwhitey/sherlock-wallet/releases/download/v0.1.0/sherlock-wallet-0.1.0.zip) from the [v0.1.0 release](https://github.com/solwhitey/sherlock-wallet/releases/tag/v0.1.0) and unzip it.
-2. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the unzipped **`sherlock-wallet-0.1.0`** folder.
+1. Download [`sherlock-wallet-0.1.1.zip`](https://github.com/solwhitey/sherlock-wallet/releases/download/v0.1.1/sherlock-wallet-0.1.1.zip) from the [v0.1.1 release](https://github.com/solwhitey/sherlock-wallet/releases/tag/v0.1.1) and unzip it.
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the unzipped **`sherlock-wallet-0.1.1`** folder.
 
 ### From source
 
