@@ -13,7 +13,14 @@ With this system, you can pretend to be any given address, have some tokens or e
 
 # Installation
 
-The Chrome Web Store has an older version without the inspector. To get this one, build it locally:
+The Chrome Web Store has an older version without the inspector. Get this one prebuilt, or build it yourself.
+
+### Prebuilt
+
+1. Download [`sherlock-wallet-0.1.0.zip`](https://github.com/solwhitey/sherlock-wallet/releases/download/v0.1.0/sherlock-wallet-0.1.0.zip) from the [v0.1.0 release](https://github.com/solwhitey/sherlock-wallet/releases/tag/v0.1.0) and unzip it.
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the unzipped **`sherlock-wallet-0.1.0`** folder.
+
+### From source
 
 1. Install [Node.js](https://nodejs.org) 20 or later. pnpm comes through `npx`, so there is nothing else to install.
 2. Clone this repo, then build it:
