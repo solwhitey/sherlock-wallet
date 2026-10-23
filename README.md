@@ -22,21 +22,53 @@ The Chrome Web Store has an older version without the inspector. Get this one pr
 
 ### From source
 
-1. Install [Node.js](https://nodejs.org) 20 or later. pnpm comes through `npx`, so there is nothing else to install.
-2. Clone this repo, then build it:
+You need [Node.js](https://nodejs.org) 20 or later and [Git](https://git-scm.com). Nothing else: `npx` fetches the right pnpm, and the Solana VM (`src/sim/svm.wasm`) is committed already built, so Rust is not needed.
+
+1. Get the code:
 
    ```bash
-   npx pnpm@10 install
+   git clone https://github.com/TeamRaccoons/sherlock-wallet.git
+   cd sherlock-wallet
+   ```
+
+   Until [#11](https://github.com/TeamRaccoons/sherlock-wallet/pull/11) is merged, the inspector lives on a fork's branch: clone it with `git clone -b simulation-inspector https://github.com/solwhitey/sherlock-wallet.git` instead.
+
+2. Install the dependencies, exactly as locked:
+
+   ```bash
+   npx pnpm@10 install --frozen-lockfile
+   ```
+
+3. Build:
+
+   ```bash
    npx pnpm@10 build
    ```
 
-3. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the **`build`** folder created inside the repo.
+   It takes a few seconds and ends with `✨ Built`. Each build starts from an empty `build` folder.
 
-Pick `build`, not the repo itself or `src`. Those hold the TypeScript sources, and Chrome refuses them with *"Could not load file 'content/index.ts' for content script"*.
+4. In Chrome, open `chrome://extensions`, turn on **Developer mode** (top right), click **Load unpacked**, and select the **`build`** folder inside `sherlock-wallet`.
 
-After pulling new changes, run `npx pnpm@10 build` again, then click the reload icon on Sherlock's card in `chrome://extensions`.
+### Updating
 
-For development, `npx pnpm@10 start` rebuilds into `dist` on every change; load `dist` instead.
+```bash
+git pull
+npx pnpm@10 install --frozen-lockfile
+npx pnpm@10 build
+```
+
+Then click the reload icon on Sherlock's card in `chrome://extensions`. Run the install step every time: a pull can change the dependencies.
+
+### Troubleshooting
+
+- ***"Could not load file 'content/index.ts' for content script"*** means the repo or `src` was selected instead of `build`. Remove that card in `chrome://extensions` and load `build`.
+- ***"Manifest file is missing or unreadable"*** means the build had not finished or failed. Run `npx pnpm@10 build` again and wait for `✨ Built`, then load `build`.
+- **`ERR_PNPM_LOCKFILE_BREAKING_CHANGE`** means an old pnpm (8 or earlier). Use `npx pnpm@10` as above rather than a global `pnpm`, and don't add `--force`: it would throw away the lockfile. A warning about the Node version means Node is older than 20 (`node -v`).
+- **Don't use `npm install` or `yarn`**: they ignore `pnpm-lock.yaml` and install newer versions than the ones tested.
+- **The extension still behaves like the old version** after rebuilding: click its reload icon in `chrome://extensions`, then close and reopen the side panel or popup.
+- **Simulations fail with HTTP 403:** the public Solana RPC refuses requests from browsers. Set your own RPC (Helius, Triton, QuickNode… all have free tiers) in the card Sherlock shows on first open, or in Settings.
+
+For development, `npx pnpm@10 start` rebuilds into `dist` on every change; load `dist` instead and reload the extension after each change. To rebuild the Solana VM itself, see `docs/wasm-svm.md`.
 
 # Features
 

@@ -2,13 +2,17 @@
   "private": true,
   "version": "0.1.0",
   "name": "sherlock-extension",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": ">=20"
+  },
   "author": "",
   "license": "Apache-2.0",
   "source": "src/manifest.json",
   "scripts": {
     "clean": "shx mkdir -p .parcel-cache dist lib build && shx rm -rf .parcel-cache dist lib build",
-    "start": "parcel --host localhost --port 1234 --no-hmr",
-    "build": "parcel build --dist-dir build --no-source-maps",
+    "start": "shx rm -rf dist && parcel --host localhost --port 1234 --no-hmr",
+    "build": "shx rm -rf build .parcel-cache && parcel build --dist-dir build --no-source-maps",
     "fmt": "prettier --write '{*,**/*}.{ts,tsx,js,jsx,json}'",
     "lint": "prettier --check '{*,**/*}.{ts,tsx,js,jsx,json}' && eslint .",
     "typecheck": "tsc --noEmit -p .",
